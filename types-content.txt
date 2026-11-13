@@ -1,0 +1,594 @@
+﻿
+// ===== ai.ts =====
+export interface LearningPathStep {
+  step: number;
+  title: string;
+  description: string;
+  skillUnlocked: string;
+  courseId?: string;
+  estimatedHours: number;
+  isUnlocked: boolean;
+}
+
+export interface PracticeQuestionItem {
+  id: string;
+  prompt: string;
+  options: string[];
+  correctIndex: number;
+  explanation: string;
+}
+
+export interface SkillAnalysisBar {
+  skill: string;
+  score: number; // 0 to 100
+  isWeakness: boolean;
+  benchmarkScore: number;
+}
+
+export type AIMessage =
+  | {
+      id: string;
+      sender: 'user' | 'assistant';
+      type: 'text';
+      content: string;
+      timestamp: string;
+    }
+  | {
+      id: string;
+      sender: 'assistant';
+      type: 'learning_path';
+      content: string;
+      steps: LearningPathStep[];
+      timestamp: string;
+    }
+  | {
+      id: string;
+      sender: 'assistant';
+      type: 'practice_questions';
+      content: string;
+      questions: PracticeQuestionItem[];
+      timestamp: string;
+    }
+  | {
+      id: string;
+      sender: 'assistant';
+      type: 'skill_analysis';
+      content: string;
+      strengths: SkillAnalysisBar[];
+      weaknesses: SkillAnalysisBar[];
+      timestamp: string;
+    };
+
+export interface QuickPrompt {
+  id: string;
+  label: string;
+  action: 'learning_path' | 'practice_questions' | 'skill_analysis' | 'general';
+  prompt: string;
+}
+
+export interface AIPracticeQuestion extends PracticeQuestionItem {
+  skillId: string;
+  topic: string;
+  difficulty: 'Beginner' | 'Intermediate' | 'Advanced';
+}
+
+export interface AIPracticeSubmissionResult {
+  skillId: string;
+  skillName: string;
+  topic: string;
+  scorePercentage: number;
+  correctCount: number;
+  totalQuestions: number;
+  gapUpdated: boolean;
+  newGapLabel: 'NONE' | 'MEDIUM' | 'HIGH';
+  readinessDelta: number;
+  feedbackSummary: string;
+}
+
+
+// ===== api.ts =====
+export interface ApiEnvelope<T> {
+  data: T;
+  message?: string;
+  success: boolean;
+  timestamp: string;
+}
+
+export interface ApiError {
+  message: string;
+  status: number;
+  code?: string;
+  details?: Record<string, unknown> | Array<unknown>;
+}
+
+export interface PaginatedEnvelope<T> extends ApiEnvelope<T[]> {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  timestamp: string;
+  actorName: string;
+  actorRole: 'LEARNER' | 'MENTOR' | 'ADMIN';
+  action: string;
+  targetType: 'USER' | 'PROJECT' | 'CERTIFICATE' | 'CAREER' | 'SKILL' | 'ASSESSMENT' | 'MENTOR_ASSIGNMENT';
+  targetId: string;
+  details: string;
+}
+
+export interface ManagedUserRecord {
+  id: string;
+  name: string;
+  email: string;
+  roles: Array<'LEARNER' | 'MENTOR' | 'ADMIN'>;
+  isActive: boolean;
+  targetCareer: string;
+  assignedMentorId?: string;
+  assignedMentorName?: string;
+  readinessScore: number;
+  verifiedSkillsCount: number;
+  registeredDate: string;
+}
+
+export interface MentorDirectoryRecord {
+  id: string;
+  name: string;
+  email: string;
+  title: string;
+  specialties: string[];
+  assignedLearnerIds: string[];
+  maxCapacity: number;
+  completedReviewsCount: number;
+  avgTurnaroundHours: number;
+  avgRubricScore: number;
+  status: 'ACTIVE' | 'ON_LEAVE' | 'PENDING_APPROVAL';
+  joinedDate: string;
+}
+
+
+// ===== assessments.ts =====
+import type { Skill, SkillLevel } from './skills';
+
+export type QuestionType =
+  | 'MCQ'
+  | 'MULTI_SELECT'
+  | 'TRUE_FALSE'
+  | 'CODING'
+  | 'SCENARIO';
+
+export interface Question {
+  id: string;
+  assessmentId: string;
+  prompt: string;
+  type: QuestionType;
+  options: string[];
+  correctAnswers: number[]; // Indices of correct options
+  explanation: string;
+  codeSnippet?: string;
+}
+
+export interface Assessment {
+  id: string;
+  title: string;
+  skillId: string;
+  skill: Skill;
+  targetLevel: SkillLevel;
+  questionCount: number;
+  timeLimitMinutes: number;
+  passingScorePercentage: number; // e.g., 70
+  previousScore?: number;
+  previousPassed?: boolean;
+  questions?: Question[];
+}
+
+export interface AssessmentAttempt {
+  assessmentId: string;
+  startedAt: string;
+  timeRemainingSeconds: number;
+  answers: Record<string, number[]>; // questionId -> selectedOptionIndices
+  flaggedQuestionIds: string[];
+}
+
+export interface AssessmentQuestionReview {
+  question: Question;
+  selectedAnswers: number[];
+  isCorrect: boolean;
+}
+
+export interface AssessmentResult {
+  id: string;
+  assessmentId: string;
+  assessmentTitle: string;
+  skill: Skill;
+  score: number;
+  totalQuestions: number;
+  percentage: number;
+  passed: boolean;
+  passingScorePercentage: number;
+  timeTakenSeconds: number;
+  completedAt: string;
+  previousSkillLevel: SkillLevel | null;
+  newVerifiedLevel: SkillLevel;
+  newVerificationStatus: 'ASSESSED';
+  nextRecommendedStep: string;
+  questionReviews: AssessmentQuestionReview[];
+}
+
+
+// ===== auth.ts =====
+export type Role = 'LEARNER' | 'MENTOR' | 'ADMIN' | 'RECRUITER';
+
+export type Permission =
+  | 'projects:submit'
+  | 'projects:review'
+  | 'projects:verify'
+  | 'content:manage'
+  | 'candidates:view'
+  | 'readiness:view'
+  | 'quizzes:take'
+  | 'skills:declare'
+  | 'assessments:manage'
+  | 'users:manage';
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  roles: Role[];
+  avatarUrl?: string;
+  isActive?: boolean;
+  disabledReason?: string;
+  title?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface LearnerProfile {
+  userId: string;
+  targetCareerId: string;
+  phone?: string;
+  location?: string;
+  education?: string;
+  currentJob?: string;
+  yearsExperience?: number;
+  resumeUrl?: string;
+  resumeFileName?: string;
+  resumeFileSize?: number;
+  resumeUploadedAt?: string;
+  githubUrl?: string;
+  linkedinUrl?: string;
+  portfolioUrl?: string;
+  isProfileComplete: boolean;
+}
+
+export interface LoginCredentials {
+  email: string;
+  password?: string;
+}
+
+export interface RegisterPayload {
+  name: string;
+  email: string;
+  password?: string;
+  targetCareerId?: string;
+}
+
+export interface AuthResponse {
+  token: string;
+  refreshToken?: string;
+  user: User;
+  profile: LearnerProfile | null;
+}
+
+
+// ===== certificates.ts =====
+export type CertificateStatus = 'VALID' | 'REVOKED' | 'EXPIRED';
+
+export interface Certificate {
+  id: string;
+  certificateNumber: string;
+  learnerName: string;
+  skillName: string;
+  courseOrProjectName: string;
+  issueDate: string;
+  expiryDate?: string;
+  scorePercentage: number;
+  status: CertificateStatus;
+  verificationUrl: string;
+  badgeLevel: string;
+}
+
+
+// ===== index.ts =====
+export * from './auth';
+export * from './skills';
+export * from './readiness';
+export * from './learning';
+export * from './assessments';
+export * from './projects';
+export * from './certificates';
+export * from './ai';
+export * from './api';
+
+
+// ===== learning.ts =====
+import type { Skill, SkillLevel } from './skills';
+
+export type LessonStatus = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED';
+
+export interface LessonResource {
+  title: string;
+  url: string;
+  type: 'pdf' | 'link' | 'doc';
+}
+
+export interface PracticalExercise {
+  prompt: string;
+  starterCode?: string;
+  solutionNotes?: string;
+}
+
+export interface Lesson {
+  id: string;
+  moduleId: string;
+  title: string;
+  durationMinutes: number;
+  status: LessonStatus;
+  order: number;
+  videoUrl?: string;
+  contentMarkdown: string;
+  codeSnippet?: {
+    language: string;
+    code: string;
+  };
+  resources?: LessonResource[];
+  practicalExercise?: PracticalExercise;
+}
+
+export interface Module {
+  id: string;
+  courseId: string;
+  title: string;
+  order: number;
+  lessons: Lesson[];
+}
+
+export interface Course {
+  id: string;
+  title: string;
+  description: string;
+  skillId: string;
+  skill: Skill;
+  skillLevelUnlocked: SkillLevel;
+  modules: Module[];
+  requiredQuizId?: string;
+  isEnrolled?: boolean;
+  progressPercentage: number;
+  isCompleted: boolean;
+  totalLessons: number;
+  completedLessons: number;
+}
+
+export type PhaseStatus = 'COMPLETED' | 'CURRENT' | 'AVAILABLE' | 'LOCKED';
+
+export interface RoadmapPhase {
+  id: string;
+  order: number;
+  title: string;
+  skill: Skill;
+  unlocksLevel: SkillLevel;
+  prerequisites: string[]; // Skill IDs or titles required before unlocking
+  status: PhaseStatus;
+  lockReason?: string;
+  courses: Course[];
+}
+
+
+// ===== projects.ts =====
+import type { Skill } from './skills';
+
+export type ProjectStatus =
+  | 'NOT_STARTED'
+  | 'SUBMITTED'
+  | 'UNDER_REVIEW'
+  | 'PASSED'
+  | 'REJECTED';
+
+export interface ProjectRubricItem {
+  criteria: string;
+  maxPoints: number;
+}
+
+export interface Project {
+  id: string;
+  title: string;
+  description: string;
+  targetSkill: Skill;
+  requiredSkills: string[];
+  requirementsChecklist: string[];
+  estimatedHours: number;
+  status: ProjectStatus;
+  rubric: ProjectRubricItem[];
+  repositoryTemplateUrl?: string;
+}
+
+export interface ProjectReviewScore {
+  codeQuality: number; // /10
+  apiDesign: number; // /10
+  databaseDesign: number; // /10
+  auth: number; // /10
+  testing: number; // /10
+  errorHandling: number; // /10
+  documentation: number; // /10
+  deployment: number; // /10
+}
+
+export interface ProjectReview {
+  id: string;
+  submissionId: string;
+  reviewerName: string;
+  scores: ProjectReviewScore;
+  totalScore: number;
+  maxScore: number;
+  feedbackText: string;
+  passed: boolean;
+  reviewedAt: string;
+}
+
+export interface ProjectSubmission {
+  id: string;
+  projectId: string;
+  projectTitle: string;
+  learnerId: string;
+  learnerName?: string;
+  learnerEmail?: string;
+  targetRole?: string;
+  githubRepoUrl: string;
+  liveDemoUrl?: string;
+  description: string;
+  technologiesUsed: string[];
+  submittedAt: string;
+  status: ProjectStatus;
+  review?: ProjectReview;
+}
+
+
+// ===== readiness.ts =====
+export type ReadinessLevel =
+  | 'FOUNDATION_REQUIRED'
+  | 'DEVELOPING'
+  | 'JUNIOR_READY'
+  | 'STRONG_CANDIDATE'
+  | 'HIGHLY_READY';
+
+export interface ReadinessBreakdown {
+  technicalSkills: number; // 35% weight
+  assessments: number; // 25% weight
+  projects: number; // 25% weight
+  interviewPrep: number; // 15% weight
+}
+
+export interface ReadinessScore {
+  overall: number; // 0 to 100
+  level: ReadinessLevel;
+  breakdown: ReadinessBreakdown;
+  assessedSkillsCount: number;
+  verifiedSkillsCount: number;
+  totalRequiredSkills: number;
+  isMostlySelfDeclared: boolean;
+  advisorySummary: string;
+  calculatedAt: string;
+}
+
+export interface ReadinessHistoryPoint {
+  date: string; // e.g. "Aug 2026", "Sep 2026", "Oct 2026"
+  score: number;
+  level: ReadinessLevel;
+}
+
+export interface DomainSkillDetail {
+  name: string;
+  score: number;
+  target: number;
+  verified: boolean;
+}
+
+export interface DomainSkillMetric {
+  domain: string;
+  learnerScore: number;
+  targetScore: number;
+  cohortAvgScore: number;
+  verifiedCount: number;
+  totalSkills: number;
+  gap: number;
+  skills: DomainSkillDetail[];
+}
+
+export interface DomainRadarSnapshot {
+  id: 'current' | 'baseline' | 'projected';
+  label: string;
+  description: string;
+  metrics: DomainSkillMetric[];
+}
+
+
+// ===== skills.ts =====
+export type SkillLevel = 'Beginner' | 'Intermediate' | 'Advanced' | 'Expert';
+
+export type VerificationStatus =
+  | 'SELF_DECLARED'
+  | 'ASSESSED'
+  | 'PROJECT_VERIFIED'
+  | 'VERIFIED';
+
+export type SkillCategory =
+  | 'Programming'
+  | 'Backend'
+  | 'Database'
+  | 'DevOps'
+  | 'Cloud'
+  | 'Testing'
+  | 'Architecture';
+
+export interface Skill {
+  id: string;
+  name: string;
+  category: SkillCategory;
+  description: string;
+}
+
+export interface UserSkill {
+  id: string;
+  userId: string;
+  skillId: string;
+  skill: Skill;
+  level: SkillLevel;
+  verificationStatus: VerificationStatus;
+  expiresAt?: string;
+  verifiedAt?: string;
+  assessedScore?: number;
+}
+
+export type SkillGapSeverity = 'CRITICAL' | 'SECONDARY';
+export type GapMagnitude = 'NONE' | 'MEDIUM' | 'HIGH';
+
+export interface SkillGap {
+  skill: Skill;
+  current: SkillLevel | null;
+  required: SkillLevel;
+  gap: GapMagnitude;
+  severity: SkillGapSeverity;
+  roadmapCourseId?: string;
+  roadmapPhaseId?: string;
+}
+
+export interface CareerRequirement {
+  skillId: string;
+  skill: Skill;
+  requiredLevel: SkillLevel;
+  importance: 'CRITICAL' | 'SECONDARY' | 'OPTIONAL';
+  weightPercentage?: number;
+}
+
+export interface CareerRole {
+  id: string;
+  title: string;
+  description: string;
+  category: string;
+  targetScore: number;
+  requirements: CareerRequirement[];
+  averageSalary?: string;
+}
+
+export interface CareerMatch {
+  careerId: string;
+  role: CareerRole;
+  matchPercentage: number;
+  readinessLevel: string;
+  criticalGapsCount: number;
+  secondaryGapsCount: number;
+}
+

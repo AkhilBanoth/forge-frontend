@@ -1,0 +1,6 @@
+{
+  "name": "SkillForge - Career Readiness Platform",
+  "description": "AI-powered career readiness platform verifying technical skills through assessments, roadmaps, and mentor-reviewed projects.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
