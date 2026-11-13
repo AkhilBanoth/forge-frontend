@@ -7,9 +7,10 @@ import axios, {
 import type { ApiError } from '../../types/api';
 
 const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ||
   import.meta.env.VITE_API_URL ||
   import.meta.env.NEXT_PUBLIC_API_URL ||
-  'http://127.0.0.1:8000';
+  'https://skill-forge-0zkr.onrender.com';
 
 export const USE_MOCKS =
   String(import.meta.env.VITE_USE_MOCKS ?? 'false') === 'true';
