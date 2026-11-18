@@ -13,7 +13,7 @@ const API_BASE_URL =
   'https://skill-forge-0zkr.onrender.com';
 
 export const USE_MOCKS =
-  String(import.meta.env.VITE_USE_MOCKS ?? 'false') === 'true';
+  String(import.meta.env.VITE_USE_MOCKS ?? 'true') === 'true';
 
 export const apiClient: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,

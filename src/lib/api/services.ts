@@ -62,6 +62,30 @@ function wrapResponse<T>(data: T, message = 'Success'): ApiEnvelope<T> {
   };
 }
 
+const DEMO_EMAILS = new Set([
+  'rahul.sharma@skillforge.io',
+  'marcus.vance@skillforge.io',
+  'devon.h@skillforge.io',
+]);
+
+function isMockSessionActive(tokenOverride?: string | null): boolean {
+  if (USE_MOCKS) return true;
+  if (tokenOverride && tokenOverride.startsWith('mock_')) return true;
+  try {
+    const persisted = localStorage.getItem('skillforge_auth');
+    if (persisted) {
+      const parsed = JSON.parse(persisted);
+      const token: unknown = parsed?.state?.token;
+      if (typeof token === 'string' && token.startsWith('mock_')) {
+        return true;
+      }
+    }
+  } catch {
+    // Ignore localStorage errors.
+  }
+  return false;
+}
+
 // Live in-memory workspace state for interactive mock runtime
 let liveSkillsCatalog: Skill[] = [...mockSkillsCatalog];
 let liveUserSkills: UserSkill[] = [...mockUserSkills];
@@ -165,6 +189,30 @@ function computeCareerMatches(skills: UserSkill[]): CareerMatch[] {
     .sort((a, b) => b.matchPercentage - a.matchPercentage);
 }
 
+const MOCK_USERS_STORAGE_KEY = 'skillforge_mock_users';
+
+function loadPersistedMockUsers(): ManagedUserRecord[] {
+  try {
+    const raw = localStorage.getItem(MOCK_USERS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePersistedMockUser(record: ManagedUserRecord) {
+  try {
+    const existing = loadPersistedMockUsers().filter(
+      (u) => u.email.toLowerCase() !== record.email.toLowerCase()
+    );
+    localStorage.setItem(MOCK_USERS_STORAGE_KEY, JSON.stringify([record, ...existing]));
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
 function resolveMockUserFromToken(token?: string | null): User {
   if (!token) return mockUser;
   if (token.includes('admin')) {
@@ -189,7 +237,8 @@ function resolveMockUserFromToken(token?: string | null): User {
       createdAt: '2026-01-10T09:00:00Z',
     };
   }
-  const matched = liveManagedUsers.find((u) => token.includes(u.id));
+  const allUsers = [...loadPersistedMockUsers(), ...liveManagedUsers];
+  const matched = allUsers.find((u) => token.includes(u.id));
   if (matched) {
     return {
       id: matched.id,
@@ -231,7 +280,7 @@ function mapBackendUser(raw: {
 
 export const authService = {
   async login(credentials: LoginCredentials): Promise<ApiEnvelope<AuthResponse>> {
-    if (USE_MOCKS) {
+    if (USE_MOCKS || DEMO_EMAILS.has(credentials.email.trim().toLowerCase())) {
       await new Promise((r) => setTimeout(r, 350));
       const email = credentials.email.trim().toLowerCase();
       const password = (credentials.password || '').trim();
@@ -252,7 +301,8 @@ export const authService = {
         };
       }
 
-      const managedRecord = liveManagedUsers.find(
+      const allManagedUsers = [...loadPersistedMockUsers(), ...liveManagedUsers];
+      const managedRecord = allManagedUsers.find(
         (u) => u.email.toLowerCase() === email
       );
 
@@ -366,7 +416,7 @@ export const authService = {
 
   async register(payload: RegisterPayload): Promise<ApiEnvelope<AuthResponse>> {
     if (USE_MOCKS) {
-      await new Promise((r) => setTimeout(r, 350));
+      await new Promise((r) => setTimeout(r, 150));
 
       const exists = liveManagedUsers.some(
         (u) => u.email.toLowerCase() === payload.email.trim().toLowerCase()
@@ -393,7 +443,7 @@ export const authService = {
 
       liveProfile = newProfile;
 
-      liveManagedUsers.unshift({
+      const createdRecord: ManagedUserRecord = {
         id: newUser.id,
         name: newUser.name,
         email: newUser.email,
@@ -405,7 +455,10 @@ export const authService = {
         readinessScore: 25,
         verifiedSkillsCount: 0,
         registeredDate: new Date().toISOString().split('T')[0],
-      });
+      };
+
+      liveManagedUsers.unshift(createdRecord);
+      savePersistedMockUser(createdRecord);
 
       return wrapResponse({
         token: `mock_jwt_token_learner_${newUser.id}`,
@@ -419,22 +472,32 @@ export const authService = {
       throw new Error('Password is required.');
     }
 
-    await apiClient.post('/auth/register', {
+    const regRes = await apiClient.post('/auth/register', {
       full_name: payload.name,
       email: payload.email,
       password: payload.password,
     });
 
-    return authService.login({
+    const loginRes = await apiClient.post<{
+      access_token: string;
+      token_type: string;
+    }>('/auth/login', {
       email: payload.email,
       password: payload.password,
+    });
+
+    return wrapResponse({
+      token: loginRes.data.access_token,
+      refreshToken: undefined,
+      user: mapBackendUser(regRes.data),
+      profile: null,
     });
   },
 
   async refresh(
     refreshToken: string
   ): Promise<ApiEnvelope<{ token: string; refreshToken: string }>> {
-    if (USE_MOCKS) {
+    if (USE_MOCKS || refreshToken.startsWith('mock_')) {
       await new Promise((r) => setTimeout(r, 150));
 
       if (!refreshToken) {
@@ -462,7 +525,7 @@ export const authService = {
   async getMe(
     tokenOverride?: string | null
   ): Promise<ApiEnvelope<{ user: User; profile: LearnerProfile | null }>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive(tokenOverride)) {
       await new Promise((r) => setTimeout(r, 120));
 
       const resolved = resolveMockUserFromToken(tokenOverride);
@@ -488,13 +551,13 @@ export const authService = {
 
 export const userService = {
   async getProfile(): Promise<ApiEnvelope<LearnerProfile>> {
-    if (USE_MOCKS) return wrapResponse(liveProfile);
+    if (isMockSessionActive()) return wrapResponse(liveProfile);
     const res = await apiClient.get<ApiEnvelope<LearnerProfile>>('/users/me');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
 
   async updateProfile(profileData: Partial<LearnerProfile>): Promise<ApiEnvelope<LearnerProfile>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       liveProfile = { ...liveProfile, ...profileData, isProfileComplete: true };
       return wrapResponse(liveProfile);
     }
@@ -502,13 +565,13 @@ export const userService = {
   },
 
   async getUserSkills(): Promise<ApiEnvelope<UserSkill[]>> {
-    if (USE_MOCKS) return wrapResponse([...liveUserSkills]);
+    if (isMockSessionActive()) return wrapResponse([...liveUserSkills]);
     const res = await apiClient.get<ApiEnvelope<UserSkill[]>>('/users/me/skills');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
 
   async addSkill(skill: Omit<UserSkill, 'id' | 'userId'>): Promise<ApiEnvelope<UserSkill>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       const newSkill: UserSkill = {
         ...skill,
         id: `usk_${Date.now()}`,
@@ -523,7 +586,7 @@ export const userService = {
   },
 
   async updateSkillLevel(skillRecordId: string, level: SkillLevel): Promise<ApiEnvelope<UserSkill>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       liveUserSkills = liveUserSkills.map((s) =>
         s.id === skillRecordId ? { ...s, level, verificationStatus: 'SELF_DECLARED' } : s
       );
@@ -534,7 +597,7 @@ export const userService = {
   },
 
   async removeSkill(skillRecordId: string): Promise<ApiEnvelope<{ id: string }>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       liveUserSkills = liveUserSkills.filter((s) => s.id !== skillRecordId);
       return wrapResponse({ id: skillRecordId });
     }
@@ -544,13 +607,13 @@ export const userService = {
 
 export const careerService = {
   async getCareers(): Promise<ApiEnvelope<CareerRole[]>> {
-    if (USE_MOCKS) return wrapResponse([...liveCareers]);
+    if (isMockSessionActive()) return wrapResponse([...liveCareers]);
     const res = await apiClient.get<ApiEnvelope<CareerRole[]>>('/careers');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
 
   async getCareerById(id: string): Promise<ApiEnvelope<CareerRole>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       const career = liveCareers.find((c) => c.id === id) || liveCareers[0];
       return wrapResponse(career);
     }
@@ -559,7 +622,7 @@ export const careerService = {
   },
 
   async selectTargetCareer(careerId: string): Promise<ApiEnvelope<LearnerProfile>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       liveProfile = { ...liveProfile, targetCareerId: careerId };
       return wrapResponse(liveProfile);
     }
@@ -567,13 +630,13 @@ export const careerService = {
   },
 
   async getSkillCatalog(): Promise<ApiEnvelope<Skill[]>> {
-    if (USE_MOCKS) return wrapResponse([...liveSkillsCatalog]);
+    if (isMockSessionActive()) return wrapResponse([...liveSkillsCatalog]);
     const res = await apiClient.get<ApiEnvelope<Skill[]>>('/skills');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
 
   async createSkill(skill: Omit<Skill, 'id'>): Promise<ApiEnvelope<Skill>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       const created: Skill = { ...skill, id: `sk_${Date.now()}` };
       liveSkillsCatalog.push(created);
       appendAudit({
@@ -594,7 +657,7 @@ export const careerService = {
     careerId: string,
     requirements: CareerRole['requirements']
   ): Promise<ApiEnvelope<CareerRole>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       const total = requirements.reduce((sum, r) => sum + (r.weightPercentage || 0), 0);
       if (total !== 100) {
         throw { message: `Skill weights must total 100% (currently ${total}%).`, status: 400 };
@@ -617,7 +680,7 @@ export const careerService = {
 
 export const skillGapService = {
   async getSkillGaps(): Promise<ApiEnvelope<SkillGap[]>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       const target = liveCareers.find((c) => c.id === liveProfile.targetCareerId) || liveCareers[0];
       return wrapResponse(computeGapsForCareer(target, liveUserSkills));
     }
@@ -631,7 +694,7 @@ export const skillGapService = {
 
 export const roadmapService = {
   async getRoadmap(): Promise<ApiEnvelope<RoadmapPhase[]>> {
-    if (USE_MOCKS) return wrapResponse([...livePhases]);
+    if (isMockSessionActive()) return wrapResponse([...livePhases]);
     const careersResponse = await apiClient.get('/careers');
     const careers = (careersResponse.data as any)?.data ?? careersResponse.data;
     if (!Array.isArray(careers) || careers.length === 0) return wrapResponse([]);
@@ -640,7 +703,7 @@ export const roadmapService = {
   },
 
   async saveRoadmapPhases(phases: RoadmapPhase[]): Promise<ApiEnvelope<RoadmapPhase[]>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       livePhases = phases;
       return wrapResponse(livePhases);
     }
@@ -648,7 +711,7 @@ export const roadmapService = {
   },
 
   async completeLesson(lessonId: string): Promise<ApiEnvelope<{ lessonId: string; status: 'COMPLETED' }>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       for (const phase of livePhases) {
         for (const course of phase.courses) {
           for (const mod of course.modules) {
@@ -681,13 +744,13 @@ export const roadmapService = {
 
 export const assessmentService = {
   async getAssessments(): Promise<ApiEnvelope<Assessment[]>> {
-    if (USE_MOCKS) return wrapResponse([...liveAssessments]);
+    if (isMockSessionActive()) return wrapResponse([...liveAssessments]);
     const res = await apiClient.get<ApiEnvelope<Assessment[]>>('/assessments');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
 
   async getAssessmentById(id: string): Promise<ApiEnvelope<Assessment>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       const match = liveAssessments.find((a) => a.id === id) || liveAssessments[1] || liveAssessments[0];
       return wrapResponse(match);
     }
@@ -700,7 +763,7 @@ export const assessmentService = {
     answers: Record<string, number[]>,
     timeTakenSeconds: number
   ): Promise<ApiEnvelope<AssessmentResult>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       await new Promise((r) => setTimeout(r, 450));
       const target = liveAssessments.find((a) => a.id === id) || liveAssessments[1];
       if (target) {
@@ -731,13 +794,13 @@ export const assessmentService = {
 
 export const projectService = {
   async getProjects(): Promise<ApiEnvelope<Project[]>> {
-    if (USE_MOCKS) return wrapResponse([...liveProjects]);
+    if (isMockSessionActive()) return wrapResponse([...liveProjects]);
     const res = await apiClient.get<ApiEnvelope<Project[]>>('/projects');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
 
   async getSubmissions(): Promise<ApiEnvelope<ProjectSubmission[]>> {
-    if (USE_MOCKS) return wrapResponse([...liveSubmissions]);
+    if (isMockSessionActive()) return wrapResponse([...liveSubmissions]);
     const res = await apiClient.get<ApiEnvelope<ProjectSubmission[]>>('/project-submissions/my');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
@@ -750,7 +813,7 @@ export const projectService = {
     description: string;
     technologiesUsed: string[];
   }): Promise<ApiEnvelope<ProjectSubmission>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       const newSub: ProjectSubmission = {
         id: `sub_${Date.now()}`,
         projectId: payload.projectId,
@@ -781,13 +844,13 @@ export const projectService = {
 
 export const certificateService = {
   async getCertificates(): Promise<ApiEnvelope<Certificate[]>> {
-    if (USE_MOCKS) return wrapResponse([...liveCertificates]);
+    if (isMockSessionActive()) return wrapResponse([...liveCertificates]);
     const res = await apiClient.get<ApiEnvelope<Certificate[]>>('/certifications/my');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
 
   async verifyCertificate(id: string): Promise<ApiEnvelope<Certificate | null>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       const cleanId = id.trim().toLowerCase();
       const cert = liveCertificates.find(
         (c) => c.certificateNumber.toLowerCase() === cleanId || c.id.toLowerCase() === cleanId
@@ -799,12 +862,12 @@ export const certificateService = {
   },
 
   async getCertificateRules(): Promise<ApiEnvelope<typeof liveCertRules>> {
-    if (USE_MOCKS) return wrapResponse({ ...liveCertRules });
+    if (isMockSessionActive()) return wrapResponse({ ...liveCertRules });
     return wrapResponse({ ...liveCertRules });
   },
 
   async updateCertificateRules(rules: typeof liveCertRules): Promise<ApiEnvelope<typeof liveCertRules>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       liveCertRules = { ...rules };
       appendAudit({
         actorName: 'Devon Hayes',
@@ -820,7 +883,7 @@ export const certificateService = {
   },
 
   async revokeCertificate(certId: string, reason: string): Promise<ApiEnvelope<Certificate>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       liveCertificates = liveCertificates.map((c) =>
         c.id === certId || c.certificateNumber === certId
           ? { ...c, status: 'REVOKED', badgeLevel: 'Revoked Record' }
@@ -845,7 +908,7 @@ export const certificateService = {
 
 export const readinessService = {
   async getReadiness(): Promise<ApiEnvelope<ReadinessScore>> {
-    if (USE_MOCKS) return wrapResponse({ ...liveReadiness });
+    if (isMockSessionActive()) return wrapResponse({ ...liveReadiness });
 
     const careersRes = await apiClient.get('/careers');
     const careers = careersRes.data;
@@ -870,14 +933,14 @@ export const readinessService = {
   },
 
   async getReadinessHistory(): Promise<ApiEnvelope<typeof liveReadinessHistory>> {
-    if (USE_MOCKS) return wrapResponse([...liveReadinessHistory]);
+    if (isMockSessionActive()) return wrapResponse([...liveReadinessHistory]);
 
     // Backend does not currently provide readiness history.
     return wrapResponse([]);
   },
 
   async getCareerMatches(): Promise<ApiEnvelope<CareerMatch[]>> {
-    if (USE_MOCKS) return wrapResponse(computeCareerMatches(liveUserSkills));
+    if (isMockSessionActive()) return wrapResponse(computeCareerMatches(liveUserSkills));
 
     const res = await apiClient.get('/recommendations/careers');
     const recommendations = res.data?.recommendations ?? [];
@@ -902,7 +965,7 @@ export const readinessService = {
   },
 
   async getDomainDistribution(): Promise<ApiEnvelope<DomainRadarSnapshot[]>> {
-    if (USE_MOCKS) return wrapResponse(mockDomainRadarSnapshots);
+    if (isMockSessionActive()) return wrapResponse(mockDomainRadarSnapshots);
 
     // Backend does not currently provide domain-distribution data.
     return wrapResponse([]);
@@ -912,12 +975,12 @@ export const readinessService = {
 
 export const aiService = {
   async getMessages(): Promise<ApiEnvelope<AIMessage[]>> {
-    if (USE_MOCKS) return wrapResponse([...liveAIMessages]);
+    if (isMockSessionActive()) return wrapResponse([...liveAIMessages]);
     return wrapResponse([...liveAIMessages]);
   },
 
   async getLearnerHistory(learnerId: string): Promise<ApiEnvelope<AIMessage[]>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       if (learnerId === 'usr_rahul_01') return wrapResponse([...liveAIMessages]);
       return wrapResponse(liveDossiers[learnerId]?.aiHistory || []);
     }
@@ -925,7 +988,7 @@ export const aiService = {
   },
 
   async sendMessage(content: string): Promise<ApiEnvelope<AIMessage>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       const userMsg: AIMessage = {
         id: `msg_usr_${Date.now()}`,
         sender: 'user',
@@ -1037,7 +1100,7 @@ return wrapResponse(assistantMsg);
   },
 
   async clearMessages(): Promise<void> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       liveAIMessages = [];
     }
   },
@@ -1047,7 +1110,7 @@ return wrapResponse(assistantMsg);
     topic: string;
     count: number;
   }): Promise<ApiEnvelope<AIPracticeQuestion[]>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       await new Promise((r) => setTimeout(r, 350));
       const matching = mockAIPracticeBank.filter((q) => q.skillId === params.skillId);
       const pool = matching.length > 0 ? matching : mockAIPracticeBank;
@@ -1083,7 +1146,7 @@ return wrapResponse(assistantMsg);
     questions: AIPracticeQuestion[];
     answers: Record<string, number>;
   }): Promise<ApiEnvelope<AIPracticeSubmissionResult>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       await new Promise((r) => setTimeout(r, 350));
       const totalQuestions = params.questions.length || 1;
       const correctCount = params.questions.reduce(
@@ -1163,14 +1226,14 @@ return wrapResponse(assistantMsg);
 
 export const mentorService = {
   async getAssignedLearners(): Promise<ApiEnvelope<LearnerDossier[]>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       return wrapResponse(Object.values(liveDossiers));
     }
     return wrapResponse([]);
   },
 
   async getLearnerDossier(learnerId: string): Promise<ApiEnvelope<LearnerDossier | null>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       const dossier = liveDossiers[learnerId];
       if (!dossier) {
         const userRec = liveManagedUsers.find((u) => u.id === learnerId);
@@ -1200,7 +1263,7 @@ export const mentorService = {
   },
 
   async getReviewQueue(): Promise<ApiEnvelope<ProjectSubmission[]>> {
-    if (USE_MOCKS) return wrapResponse([...liveSubmissions]);
+    if (isMockSessionActive()) return wrapResponse([...liveSubmissions]);
     const res = await apiClient.get('/admin/project-submissions');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
@@ -1212,7 +1275,7 @@ export const mentorService = {
     decision: 'APPROVE' | 'REJECT';
     reviewerName?: string;
   }): Promise<ApiEnvelope<ProjectSubmission>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       const s = payload.scores;
       const totalScore =
         s.codeQuality +
@@ -1281,7 +1344,7 @@ export const mentorService = {
 
 export const adminService = {
   async getUsers(): Promise<ApiEnvelope<ManagedUserRecord[]>> {
-    if (USE_MOCKS) return wrapResponse([...liveManagedUsers]);
+    if (isMockSessionActive()) return wrapResponse([...liveManagedUsers]);
     const res = await apiClient.get<ApiEnvelope<ManagedUserRecord[]>>('/admin/users');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
@@ -1292,7 +1355,7 @@ export const adminService = {
     roles: Array<'LEARNER' | 'MENTOR' | 'ADMIN'>;
     targetCareer?: string;
   }): Promise<ApiEnvelope<ManagedUserRecord>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       const created: ManagedUserRecord = {
         id: `usr_${Date.now()}`,
         name: payload.name,
@@ -1338,7 +1401,7 @@ export const adminService = {
     userId: string,
     patch: Partial<Pick<ManagedUserRecord, 'name' | 'roles' | 'isActive' | 'targetCareer'>>
   ): Promise<ApiEnvelope<ManagedUserRecord>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       liveManagedUsers = liveManagedUsers.map((u) => (u.id === userId ? { ...u, ...patch } : u));
       const updated = liveManagedUsers.find((u) => u.id === userId) || liveManagedUsers[0];
       appendAudit({
@@ -1362,12 +1425,12 @@ export const adminService = {
   },
 
   async getMentors(): Promise<ApiEnvelope<MentorDirectoryRecord[]>> {
-    if (USE_MOCKS) return wrapResponse([...liveMentors]);
+    if (isMockSessionActive()) return wrapResponse([...liveMentors]);
     return wrapResponse([]);
   },
 
   async assignLearnerToMentor(learnerId: string, mentorId: string): Promise<ApiEnvelope<{ learnerId: string; mentorId: string }>> {
-    if (USE_MOCKS) {
+    if (isMockSessionActive()) {
       const mentor = liveMentors.find((m) => m.id === mentorId);
       const learner = liveManagedUsers.find((u) => u.id === learnerId);
       if (mentor) {
@@ -1397,7 +1460,7 @@ export const adminService = {
   },
 
   async getAuditLogs(): Promise<ApiEnvelope<AuditLogEntry[]>> {
-    if (USE_MOCKS) return wrapResponse([...liveAuditLogs]);
+    if (isMockSessionActive()) return wrapResponse([...liveAuditLogs]);
     return wrapResponse([]);
   },
 };
