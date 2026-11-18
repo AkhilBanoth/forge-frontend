@@ -998,46 +998,114 @@ export const aiService = {
       };
       liveAIMessages.push(userMsg);
 
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 250));
+
+      const lower = content.trim().toLowerCase();
+      const targetCareer =
+        liveCareers.find((c) => c.id === liveProfile.targetCareerId) || liveCareers[0];
+      const verifiedCount = liveUserSkills.filter(
+        (s) => s.verificationStatus !== 'SELF_DECLARED'
+      ).length;
+      const gaps = computeGapsForCareer(targetCareer, liveUserSkills);
+      const openGaps = gaps.filter((g) => g.gap !== 'NONE');
+      const nowIso = new Date().toISOString();
 
       let assistantMsg: AIMessage;
-      const lower = content.toLowerCase();
 
-      if (lower.includes('practice') || lower.includes('quiz')) {
+      if (
+        /^(hi|hello|hey|hii+|yo|hola|namaste|good\s+(morning|afternoon|evening)|how\s+are\s+you|what'?s\s+up)\b/.test(
+          lower
+        )
+      ) {
+        assistantMsg = {
+          id: `msg_asst_${Date.now()}`,
+          sender: 'assistant',
+          type: 'text',
+          content: `Hey! I'm your SkillForge AI Career Mentor.\n\nRight now you're tracking toward ${targetCareer.title} at ${liveReadiness.overall}% readiness (${verifiedCount}/${liveUserSkills.length} verified skills, ${openGaps.length} open skill gaps).\n\nYou can ask me:\n• "What is SkillForge?" — how verification & scoring work\n• "Analyze my weak areas" — see what's blocking 85%+ readiness\n• "What should I do next?" — get a step-by-step study plan\n• "Practice Docker quiz" — generate quick technical questions`,
+          timestamp: nowIso,
+        };
+      } else if (
+        lower.includes('skillforge') ||
+        lower.includes('skill forge') ||
+        lower.includes('about this') ||
+        lower.includes('what is this') ||
+        lower.includes('how does it work') ||
+        lower.includes('tell about') ||
+        lower.includes('tell me about')
+      ) {
+        assistantMsg = {
+          id: `msg_asst_${Date.now()}`,
+          sender: 'assistant',
+          type: 'text',
+          content: `SkillForge is an AI-powered career readiness platform that proves real technical competence instead of passive video completion.\n\nHow it works:\n1. Skill Upgrade Pipeline: Learn in Courses → Pass Timed Assessments (≥70% to earn ASSESSED) → Build Capstone Projects → Pass Mentor Code Review (PROJECT_VERIFIED).\n2. Verified Beats Self-Declared: Self-declared skills carry a dashed badge and don't boost your verified readiness until tested.\n3. Readiness Formula: 35% Technical Skills + 25% Timed Assessments + 25% Mentor-Reviewed Projects + 15% Interview Prep.\n4. Verifiable Credentials: Earned certificates include public verification IDs at /verify.\n\nWant me to show your weak areas or build your next study plan?`,
+          timestamp: nowIso,
+        };
+      } else if (lower.includes('practice') || lower.includes('quiz') || lower.includes('question')) {
+        let targetSkillId = 'sk_docker';
+        let skillLabel = 'Docker';
+        if (lower.includes('fastapi')) {
+          targetSkillId = 'sk_fastapi';
+          skillLabel = 'FastAPI';
+        } else if (lower.includes('postgres') || lower.includes('sql')) {
+          targetSkillId = 'sk_postgres';
+          skillLabel = 'PostgreSQL';
+        } else if (lower.includes('aws') || lower.includes('cloud')) {
+          targetSkillId = 'sk_aws';
+          skillLabel = 'AWS';
+        } else if (lower.includes('python')) {
+          targetSkillId = 'sk_py';
+          skillLabel = 'Python';
+        } else if (lower.includes('pytest') || lower.includes('test')) {
+          targetSkillId = 'sk_testing';
+          skillLabel = 'PyTest';
+        }
+
+        const matchedBank = mockAIPracticeBank.filter((q) => q.skillId === targetSkillId);
+        const picked = (matchedBank.length > 0 ? matchedBank : mockAIPracticeBank).slice(0, 2);
+
         assistantMsg = {
           id: `msg_asst_${Date.now()}`,
           sender: 'assistant',
           type: 'practice_questions',
-          content: 'Here are targeted practice questions based on your current Docker and FastAPI gaps:',
-          questions: [
-            {
-              id: 'pq_1',
-              prompt: 'Which Dockerfile instruction creates a persistent storage mount outside the container filesystem?',
-              options: ['EXPOSE', 'VOLUME', 'WORKDIR', 'ENV'],
-              correctIndex: 1,
-              explanation: 'VOLUME defines a persistent mount point outside the container layer.',
-            },
-            {
-              id: 'pq_2',
-              prompt: 'In FastAPI, what is the best way to manage database sessions per async request?',
-              options: [
-                'Create a global session shared by every request',
-                'Use an async generator with yield inside a Depends() dependency',
-                'Disable connection pooling',
-                'Open a new database engine inside every route',
-              ],
-              correctIndex: 1,
-              explanation: 'Yielding a session from Depends() ensures clean session teardown even if an error happens.',
-            },
+          content: `Here are targeted ${skillLabel} practice questions tailored to your current gaps:`,
+          questions: picked.map((q, idx) => ({
+            id: `pq_${Date.now()}_${idx}`,
+            prompt: q.prompt,
+            options: q.options,
+            correctIndex: q.correctIndex,
+            explanation: q.explanation,
+          })),
+          timestamp: nowIso,
+        };
+      } else if (
+        lower.includes('weak') ||
+        lower.includes('analy') ||
+        lower.includes('gap') ||
+        lower.includes('85%')
+      ) {
+        assistantMsg = {
+          id: `msg_asst_${Date.now()}`,
+          sender: 'assistant',
+          type: 'skill_analysis',
+          content: `Current readiness is ${liveReadiness.overall}% (target: 85% Strong Candidate). Closing your DevOps and Cloud gaps plus completing the Docker capstone project will unlock the biggest score gain:`,
+          strengths: [
+            { skill: 'REST API Design', score: 94, benchmarkScore: 70, isWeakness: false },
+            { skill: 'Python Core & Async', score: 92, benchmarkScore: 75, isWeakness: false },
+            { skill: 'PostgreSQL Schema Design', score: 82, benchmarkScore: 65, isWeakness: false },
           ],
-          timestamp: new Date().toISOString(),
+          weaknesses: [
+            { skill: 'Docker Containerization', score: 35, benchmarkScore: 65, isWeakness: true },
+            { skill: 'AWS Cloud Deployment', score: 25, benchmarkScore: 60, isWeakness: true },
+            { skill: 'PyTest Fixture Mocking', score: 58, benchmarkScore: 70, isWeakness: true },
+          ],
+          timestamp: nowIso,
         };
       } else if (lower.includes('plan') || lower.includes('roadmap') || lower.includes('next')) {
         assistantMsg = {
           id: `msg_asst_${Date.now()}`,
           sender: 'assistant',
           type: 'learning_path',
-          content: 'Here is your personalized, verified-first study plan toward 85%+ Python Backend readiness:',
+          content: `Here is your personalized, verified-first study plan toward 85%+ ${targetCareer.title} readiness:`,
           steps: [
             {
               step: 1,
@@ -1065,15 +1133,63 @@ export const aiService = {
               isUnlocked: false,
             },
           ],
-          timestamp: new Date().toISOString(),
+          timestamp: nowIso,
+        };
+      } else if (lower.includes('readiness') || lower.includes('score') || lower.includes('formula')) {
+        const b = liveReadiness.breakdown;
+        assistantMsg = {
+          id: `msg_asst_${Date.now()}`,
+          sender: 'assistant',
+          type: 'text',
+          content: `Your current Readiness Score for ${targetCareer.title} is ${liveReadiness.overall}% (${liveReadiness.level.replace(/_/g, ' ')}).\n\nBreakdown:\n• Technical Skills (35% weight): ${b.technicalSkills}%\n• Timed Assessments (25% weight): ${b.assessments}%\n• Mentor-Reviewed Projects (25% weight): ${b.projects}%\n• Interview Prep (15% weight): ${b.interviewPrep}%\n\nYou are only ${Math.max(1, 75 - liveReadiness.overall)} points away from Strong Candidate (75%+). Improving Docker & Interview Prep gives you the fastest lift.`,
+          timestamp: nowIso,
+        };
+      } else if (lower.includes('project') || lower.includes('mentor') || lower.includes('review')) {
+        const pendingCount = liveSubmissions.filter((s) => s.status === 'UNDER_REVIEW').length;
+        const passedCount = liveSubmissions.filter((s) => s.status === 'PASSED').length;
+        assistantMsg = {
+          id: `msg_asst_${Date.now()}`,
+          sender: 'assistant',
+          type: 'text',
+          content: `Projects require formal Mentor Code Review (learners cannot self-verify submissions).\n\nYour current status:\n• Passed projects: ${passedCount}\n• Awaiting mentor review: ${pendingCount}\n• Recommended next build: "${liveProjects[1]?.title || 'Distributed Background Job Queue with Docker Compose'}"\n\nOpen the Projects tab to submit a GitHub repo or review rubric feedback.`,
+          timestamp: nowIso,
+        };
+      } else if (lower.includes('cert') || lower.includes('badge') || lower.includes('verify')) {
+        assistantMsg = {
+          id: `msg_asst_${Date.now()}`,
+          sender: 'assistant',
+          type: 'text',
+          content: `You currently have ${liveCertificates.length} certificates on record.\n\nCertificates are awarded once you meet course completion, quiz average (≥70%), and mentor-verified project benchmarks. Any employer can verify a certificate ID publicly at /verify.`,
+          timestamp: nowIso,
+        };
+      } else if (
+        lower.includes('docker') ||
+        lower.includes('fastapi') ||
+        lower.includes('aws') ||
+        lower.includes('postgres') ||
+        lower.includes('python') ||
+        lower.includes('skill') ||
+        lower.includes('career') ||
+        lower.includes('interview')
+      ) {
+        const gapNames =
+          openGaps.length > 0
+            ? openGaps.map((g) => `${g.skill.name} (${g.current ?? 'Not Started'} → ${g.required})`).join('\n• ')
+            : 'All target skills meet role requirements!';
+        assistantMsg = {
+          id: `msg_asst_${Date.now()}`,
+          sender: 'assistant',
+          type: 'text',
+          content: `For ${targetCareer.title}, you have ${verifiedCount} verified skills out of ${liveUserSkills.length} tracked.\n\nOpen skill gaps to close:\n• ${gapNames}\n\nTip: Pick a skill in the Practice Generator above (Docker, FastAPI, PostgreSQL, Python, or AWS) or type "Practice Docker quiz" to test yourself immediately.`,
+          timestamp: nowIso,
         };
       } else {
         assistantMsg = {
           id: `msg_asst_${Date.now()}`,
           sender: 'assistant',
           type: 'text',
-          content: `Regarding "${content}": SkillForge prioritizes verified ability over passive course completion. Your highest-impact step right now is closing your Docker gap to lift your readiness score from ${liveReadiness.overall}% toward the Strong Candidate tier.`,
-          timestamp: new Date().toISOString(),
+          content: `Good question about "${content.trim()}".\n\nBased on your ${targetCareer.title} track (${liveReadiness.overall}% readiness), I can help you:\n• Break down your ${openGaps.length} remaining skill gaps\n• Generate targeted quiz questions for Docker, FastAPI, PostgreSQL, Python, or AWS\n• Recommend which course, assessment, or capstone project to tackle next\n\nTell me which topic or goal you'd like to dive into!`,
+          timestamp: nowIso,
         };
       }
 
