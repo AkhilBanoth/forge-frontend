@@ -12,7 +12,6 @@ import {
 import { mockCareers, mockSkillGaps, mockUserSkills } from '../../lib/mocks/data';
 import { userService } from '../../lib/api/services';
 import type { UserSkill } from '../../types';
-import { TechieInventoryWorkspace } from '../shared/TechieInventoryWorkspace';
 import {
   ArrowRight,
   FolderGit2,
@@ -93,9 +92,6 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
           </p>
         </div>
       </div>
-
-      {/* Interactive Techie Developer Inventory & Hardware Workspace */}
-      <TechieInventoryWorkspace mode="learner" onNavigate={onNavigate} />
 
       {/* Hero Section: Two Rings + Readiness Status */}
       <div className="grid gap-6 md:grid-cols-12">
