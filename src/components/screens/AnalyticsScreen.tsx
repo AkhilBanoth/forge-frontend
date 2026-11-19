@@ -1,27 +1,53 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { PageHeader } from '../shared/PageHeader';
 import { useReadiness } from '../../hooks/useReadiness';
 import { useAuthStore } from '../../stores/authStore';
-import { mockUserSkills, mockCareerMatches } from '../../lib/mocks/data';
+import { careerService, skillGapService, userService } from '../../lib/api/services';
+import type { SkillGap, UserSkill } from '../../types';
 import { TrendingUp, BarChart3, ArrowRight, Compass, Check } from 'lucide-react';
 import { showToast } from '../shared/ToastNotification';
 import { cn } from '../../lib/utils';
 
 export function AnalyticsScreen({ onNavigate }: { onNavigate: (path: string) => void }) {
-  const { history } = useReadiness();
+  const { history, matches } = useReadiness();
+  const userId = useAuthStore((state) => state.user?.id);
   const profile = useAuthStore((state) => state.profile);
   const setProfile = useAuthStore((state) => state.setProfile);
 
+  const [userSkills, setUserSkills] = useState<UserSkill[]>([]);
+  const [gaps, setGaps] = useState<SkillGap[]>([]);
+
+  useEffect(() => {
+    let mounted = true;
+    Promise.all([userService.getUserSkills(), skillGapService.getSkillGaps()])
+      .then(([skillsRes, gapsRes]) => {
+        if (!mounted) return;
+        setUserSkills(skillsRes.data || []);
+        setGaps(gapsRes.data || []);
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [userId, profile?.targetCareerId]);
+
   const activeTargetId = profile?.targetCareerId || 'career_py_backend';
 
-  // Sort user skills by proficiency to identify weakest
-  const sortedWeakestSkills = [...mockUserSkills]
+  const sortedWeakestSkills = [...userSkills]
     .filter((s) => s.assessedScore !== undefined || s.verificationStatus === 'SELF_DECLARED')
-    .sort((a, b) => (a.assessedScore || 30) - (b.assessedScore || 30));
+    .sort((a, b) => (a.assessedScore ?? 25) - (b.assessedScore ?? 25));
 
-  const handleSetTarget = (careerId: string, title: string) => {
-    if (profile) {
-      setProfile({ ...profile, targetCareerId: careerId });
+  const openGaps = gaps.filter((g) => g.gap !== 'NONE');
+  const firstGap = openGaps[0];
+
+  const handleSetTarget = async (careerId: string, title: string) => {
+    try {
+      const res = await careerService.selectTargetCareer(careerId);
+      setProfile(res.data);
+    } catch {
+      if (profile) {
+        setProfile({ ...profile, targetCareerId: careerId });
+      }
     }
     showToast('success', `Your target job role is now set to ${title}.`);
   };
@@ -52,25 +78,31 @@ export function AnalyticsScreen({ onNavigate }: { onNavigate: (path: string) => 
           </div>
 
           <div className="space-y-3">
-            {sortedWeakestSkills.slice(0, 5).map((item) => {
-              const score = item.assessedScore || 35;
-              return (
-                <div key={item.id} className="space-y-1.5 font-mono text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-foreground">{item.skill.name}</span>
-                    <span className="font-bold tabular-nums text-foreground">
-                      {score}% ({item.level})
-                    </span>
+            {sortedWeakestSkills.length === 0 ? (
+              <p className="text-xs text-muted-foreground py-4">
+                Add skills in your Profile or take a timed quiz to see your weakest areas here.
+              </p>
+            ) : (
+              sortedWeakestSkills.slice(0, 5).map((item) => {
+                const score = item.assessedScore ?? 25;
+                return (
+                  <div key={item.id} className="space-y-1.5 font-mono text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-foreground">{item.skill.name}</span>
+                      <span className="font-bold tabular-nums text-foreground">
+                        {score}% ({item.level})
+                      </span>
+                    </div>
+                    <div className="h-2 w-full rounded-sm bg-secondary overflow-hidden">
+                      <div
+                        className="h-full bg-foreground transition-all duration-500"
+                        style={{ width: `${score}%` }}
+                      />
+                    </div>
                   </div>
-                  <div className="h-2 w-full rounded-sm bg-secondary overflow-hidden">
-                    <div
-                      className="h-full bg-foreground transition-all duration-500"
-                      style={{ width: `${score}%` }}
-                    />
-                  </div>
-                </div>
-              );
-            })}
+                );
+              })
+            )}
           </div>
         </div>
 
@@ -92,9 +124,9 @@ export function AnalyticsScreen({ onNavigate }: { onNavigate: (path: string) => 
           </div>
 
           <div className="space-y-5 pt-2">
-            <div className="flex items-end justify-between h-36 px-4 border-b border-border/80">
+            <div className="flex items-end justify-around h-36 px-4 border-b border-border/80">
               {history.map((pt) => {
-                const height = Math.max(25, (pt.score / 100) * 110);
+                const height = Math.max(14, (pt.score / 100) * 110);
                 return (
                   <div key={pt.date} className="flex flex-col items-center gap-2">
                     <span className="font-mono text-xs font-bold tabular-nums">{pt.score}%</span>
@@ -111,7 +143,9 @@ export function AnalyticsScreen({ onNavigate }: { onNavigate: (path: string) => 
             </div>
             <div className="rounded border border-dashed border-border bg-surface p-3 text-xs font-mono text-muted-foreground">
               <span className="font-bold text-foreground">Outlook: </span>
-              At your current pace, you are on track to cross the 80% Strong Candidate mark within 3 weeks.
+              {history.length >= 2
+                ? 'Keep passing timed quizzes and mentor reviews to maintain your monthly momentum.'
+                : 'Your baseline is recorded. Pass your first timed quiz to start building a verified growth trend.'}
             </div>
           </div>
         </div>
@@ -138,25 +172,27 @@ export function AnalyticsScreen({ onNavigate }: { onNavigate: (path: string) => 
           {[
             {
               priority: '1st Priority',
-              title: 'Docker & Multi-Stage Containers',
+              title: firstGap ? `Study ${firstGap.skill.name}` : 'Continue Roadmap Modules',
               impact: '+8% readiness boost',
-              reason: 'Required before you can unlock the AWS Cloud course and pass the container quiz.',
+              reason: firstGap
+                ? `Required at ${firstGap.required} level for your target career role.`
+                : 'Finish your current roadmap phase to unlock advanced capstones.',
               path: '/roadmap',
               action: 'Open Course',
             },
             {
               priority: '2nd Priority',
-              title: 'Pass Docker Timed Assessment',
-              impact: 'Verifies Docker skill',
-              reason: 'Score 70% or higher to upgrade Docker from Self-Declared to Assessed.',
+              title: `Pass ${firstGap ? firstGap.skill.name.split(' ')[0] : 'Core'} Timed Assessment`,
+              impact: 'Verifies skill status',
+              reason: 'Score 70% or higher to upgrade from Self-Declared to Assessed.',
               path: '/assessments',
               action: 'Go to Quizzes',
             },
             {
               priority: '3rd Priority',
-              title: 'Finish Healthcare API Review',
-              impact: '+6% project credit',
-              reason: 'Passing mentor review gives project verification for FastAPI and PostgreSQL.',
+              title: 'Submit a Capstone Project',
+              impact: '+25% project weight',
+              reason: 'Passing an 8-point mentor rubric review grants Project-Verified status.',
               path: '/projects',
               action: 'View Projects',
             },
@@ -200,7 +236,7 @@ export function AnalyticsScreen({ onNavigate }: { onNavigate: (path: string) => 
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {mockCareerMatches.map((cm) => {
+          {matches.map((cm) => {
             const isTarget = cm.careerId === activeTargetId;
             return (
               <div

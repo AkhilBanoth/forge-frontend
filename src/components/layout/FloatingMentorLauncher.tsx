@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useMentorStore } from '../../stores/mentorStore';
+import { useAuthStore } from '../../stores/authStore';
 import { Bot, X, Send, CheckCircle2, XCircle } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
 export function FloatingMentorLauncher() {
+  const userId = useAuthStore((s) => s.user?.id);
   const {
     isOpen,
     toggleOpen,
@@ -21,7 +23,7 @@ export function FloatingMentorLauncher() {
 
   useEffect(() => {
     fetchMessages();
-  }, [fetchMessages]);
+  }, [fetchMessages, userId]);
 
   useEffect(() => {
     if (isOpen) {

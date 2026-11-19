@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useMentorStore } from '../../stores/mentorStore';
+import { useAuthStore } from '../../stores/authStore';
 import { PageHeader } from '../shared/PageHeader';
 import {
   Send,
@@ -13,6 +14,7 @@ import {
 import { cn } from '../../lib/utils';
 
 export function AIMentorScreen({ onNavigate }: { onNavigate: (path: string) => void }) {
+  const userId = useAuthStore((s) => s.user?.id);
   const {
     messages,
     isTyping,
@@ -32,7 +34,7 @@ export function AIMentorScreen({ onNavigate }: { onNavigate: (path: string) => v
 
   useEffect(() => {
     fetchMessages();
-  }, [fetchMessages]);
+  }, [fetchMessages, userId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });

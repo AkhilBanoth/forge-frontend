@@ -14,6 +14,7 @@ interface MentorStore {
   fetchMessages: () => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
   clearHistory: () => Promise<void>;
+  resetLocalState: () => void;
 }
 
 export const useMentorStore = create<MentorStore>((set, get) => ({
@@ -58,8 +59,7 @@ export const useMentorStore = create<MentorStore>((set, get) => ({
     if (!content.trim()) return;
     set({ isTyping: true, error: null });
     try {
-      const res = await aiService.sendMessage(content);
-      // Fetch latest messages from service
+      await aiService.sendMessage(content);
       const allRes = await aiService.getMessages();
       set({ messages: allRes.data, isTyping: false });
     } catch {
@@ -73,5 +73,9 @@ export const useMentorStore = create<MentorStore>((set, get) => ({
   clearHistory: async () => {
     await aiService.clearMessages();
     set({ messages: [], error: null });
+  },
+
+  resetLocalState: () => {
+    set({ messages: [], isOpen: false, isTyping: false, error: null });
   },
 }));

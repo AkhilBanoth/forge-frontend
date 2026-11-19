@@ -9,9 +9,26 @@ import {
   SkillUpgradeStepper,
   SkillDomainRadarChart,
 } from '../shared';
-import { mockCareers, mockSkillGaps, mockUserSkills } from '../../lib/mocks/data';
-import { userService } from '../../lib/api/services';
-import type { UserSkill } from '../../types';
+import { READINESS_THRESHOLDS } from '../../constants';
+import { mockCareers } from '../../lib/mocks/data';
+import {
+  assessmentService,
+  careerService,
+  certificateService,
+  projectService,
+  roadmapService,
+  skillGapService,
+  userService,
+} from '../../lib/api/services';
+import type {
+  Assessment,
+  CareerRole,
+  Certificate,
+  ProjectSubmission,
+  RoadmapPhase,
+  SkillGap,
+  UserSkill,
+} from '../../types';
 import {
   ArrowRight,
   FolderGit2,
@@ -31,34 +48,113 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
   const user = useAuthStore((state) => state.user);
   const profile = useAuthStore((state) => state.profile);
   const { scoreData, currentTier, history, matches, domainSnapshots } = useReadiness();
-  const [userSkills, setUserSkills] = useState<UserSkill[]>(mockUserSkills);
+
+  const [userSkills, setUserSkills] = useState<UserSkill[]>([]);
+  const [skillGaps, setSkillGaps] = useState<SkillGap[]>([]);
+  const [careers, setCareers] = useState<CareerRole[]>(mockCareers);
+  const [roadmapPhases, setRoadmapPhases] = useState<RoadmapPhase[]>([]);
+  const [assessments, setAssessments] = useState<Assessment[]>([]);
+  const [submissions, setSubmissions] = useState<ProjectSubmission[]>([]);
+  const [certificates, setCertificates] = useState<Certificate[]>([]);
 
   useEffect(() => {
     let mounted = true;
-    userService
-      .getUserSkills()
-      .then((res) => {
-        if (mounted && res.data.length > 0) {
-          setUserSkills(res.data);
-        }
+    Promise.all([
+      userService.getUserSkills(),
+      skillGapService.getSkillGaps(),
+      careerService.getCareers(),
+      roadmapService.getRoadmap(),
+      assessmentService.getAssessments(),
+      projectService.getSubmissions(),
+      certificateService.getCertificates(),
+    ])
+      .then(([skillsRes, gapsRes, careersRes, roadmapRes, assessRes, subRes, certRes]) => {
+        if (!mounted) return;
+        setUserSkills(skillsRes.data || []);
+        setSkillGaps(gapsRes.data || []);
+        if (careersRes.data?.length) setCareers(careersRes.data);
+        setRoadmapPhases(roadmapRes.data || []);
+        setAssessments(assessRes.data || []);
+        setSubmissions(subRes.data || []);
+        setCertificates(certRes.data || []);
       })
       .catch(() => {
-        // Keep mockUserSkills fallback
+        // Keep empty defaults on transient error
       });
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [user?.id, profile?.targetCareerId]);
 
   const targetCareer =
-    mockCareers.find((c) => c.id === profile?.targetCareerId) || mockCareers[0];
+    careers.find((c) => c.id === profile?.targetCareerId) || careers[0] || mockCareers[0];
 
-  const criticalGaps = mockSkillGaps.filter((g) => g.severity === 'CRITICAL');
-  const secondaryGaps = mockSkillGaps.filter((g) => g.severity === 'SECONDARY');
+  const openGaps = skillGaps.filter((g) => g.gap !== 'NONE');
+  const criticalGaps = openGaps.filter((g) => g.severity === 'CRITICAL');
+  const secondaryGaps = openGaps.filter((g) => g.severity === 'SECONDARY');
+  const topPriorityGap = criticalGaps[0] || secondaryGaps[0];
 
-  const readinessValue = scoreData?.overall || 72;
-  const verifiedSkillsCount = scoreData?.verifiedSkillsCount || 7;
-  const totalSkillsCount = scoreData?.totalRequiredSkills || 10;
+  const readinessValue = scoreData?.overall ?? 0;
+  const verifiedSkillsCount = scoreData?.verifiedSkillsCount ?? 0;
+  const totalSkillsCount = scoreData?.totalRequiredSkills ?? (targetCareer.requirements.length || 10);
+  const remainingToVerify = Math.max(0, totalSkillsCount - verifiedSkillsCount);
+
+  // Next tier progress calculation
+  const nextTier =
+    READINESS_THRESHOLDS.find((t) => t.min > readinessValue) ||
+    READINESS_THRESHOLDS[READINESS_THRESHOLDS.length - 1];
+  const pointsToNextTier = Math.max(0, nextTier.min - readinessValue);
+
+  // Dynamic stat card calculations from logged-in user's workspace
+  const allCourses = roadmapPhases.flatMap((p) => p.courses || []);
+  const totalLessons = allCourses.reduce((sum, c) => sum + (c.totalLessons || 0), 0);
+  const completedLessons = allCourses.reduce((sum, c) => sum + (c.completedLessons || 0), 0);
+  const courseCompletionPct =
+    totalLessons > 0 ? Math.round((completedLessons / totalLessons) * 100) : 0;
+
+  const passedProjects = submissions.filter((s) => s.status === 'PASSED').length;
+  const latestPassedProject = submissions.find((s) => s.status === 'PASSED' && s.review);
+
+  const attemptedQuizzes = assessments.filter((a) => typeof a.previousScore === 'number');
+  const passedQuizzesCount = attemptedQuizzes.filter((a) => a.previousPassed).length;
+  const quizAverage =
+    attemptedQuizzes.length > 0
+      ? Math.round(
+          attemptedQuizzes.reduce((sum, a) => sum + (a.previousScore || 0), 0) /
+            attemptedQuizzes.length
+        )
+      : 0;
+
+  // Dynamic pipeline step index (0..3)
+  const pipelineStepIndex =
+    passedProjects > 0
+      ? 3
+      : submissions.length > 0 || passedQuizzesCount > 0
+        ? 2
+        : completedLessons > 0
+          ? 1
+          : 0;
+
+  const nextRenewalDate = userSkills.find((s) => s.expiresAt)?.expiresAt || 'Not scheduled yet';
+
+  // Growth trend caption
+  const historyDelta =
+    history.length >= 2 ? history[history.length - 1].score - history[0].score : 0;
+  const trendCaption =
+    history.length >= 2
+      ? `${historyDelta >= 0 ? '+' : ''}${historyDelta} pts growth over ${history.length} months of verified projects and quizzes`
+      : 'Baseline recorded — pass quizzes and submit projects to track your monthly growth';
+
+  const breakdownTechnical = scoreData?.breakdown.technicalSkills ?? 0;
+  const breakdownAssessments = scoreData?.breakdown.assessments ?? 0;
+  const breakdownProjects = scoreData?.breakdown.projects ?? 0;
+  const breakdownInterview = scoreData?.breakdown.interviewPrep ?? 0;
+
+  const advisoryHeadline =
+    scoreData?.advisorySummary ||
+    (readinessValue >= 60
+      ? `Based on your SkillForge scores, you appear ready for junior ${targetCareer.title} roles.`
+      : `You are building your ${targetCareer.title} readiness profile. Start a course and take a quiz to verify your first skill.`);
 
   return (
     <div className="space-y-8 select-none">
@@ -69,7 +165,7 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
             Learning Overview
           </span>
           <h1 className="text-2xl font-black tracking-tight sm:text-3xl text-foreground font-sans">
-            Welcome back, {user?.name || 'Rahul'}
+            Welcome back, {user?.name || 'Learner'}
           </h1>
         </div>
         <div className="flex items-center gap-2">
@@ -84,9 +180,7 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
       <div className="flex items-start gap-3 rounded-lg border border-border bg-surface p-4 text-xs text-muted-foreground">
         <Info className="h-4 w-4 shrink-0 text-foreground mt-0.5" />
         <div className="flex-1 space-y-1">
-          <p className="font-medium text-foreground">
-            Based on your SkillForge scores, you appear ready for junior Python backend roles.
-          </p>
+          <p className="font-medium text-foreground">{advisoryHeadline}</p>
           <p className="text-[11px] leading-relaxed">
             Completing courses is a great start, but passing skill quizzes and building real projects is what proves you are ready for the job.
           </p>
@@ -102,7 +196,11 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
               <span className="text-xs font-mono uppercase tracking-wider text-muted-foreground font-bold">
                 Readiness Score
               </span>
-              <ReadinessBadge level={scoreData?.level || 'JUNIOR_READY'} size="sm" showTier />
+              <ReadinessBadge
+                level={scoreData?.level || 'FOUNDATION_REQUIRED'}
+                size="sm"
+                showTier
+              />
             </div>
 
             <div className="flex flex-col sm:flex-row items-center gap-8 py-2">
@@ -118,21 +216,24 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
               <div className="space-y-3 flex-1 text-center sm:text-left">
                 <div className="space-y-1">
                   <h2 className="text-xl font-bold tracking-tight">
-                    {currentTier?.label || 'Junior Ready'}
+                    {currentTier?.label || 'Foundation Required'}
                   </h2>
                   <p className="text-xs text-muted-foreground leading-relaxed">
-                    {currentTier?.description}
+                    {currentTier?.description ||
+                      'Core concepts need strengthening before entering assessment pipelines.'}
                   </p>
                 </div>
 
                 <div className="pt-2 border-t border-border/60 flex items-center justify-between sm:justify-start gap-6 text-xs font-mono">
                   <div>
                     <span className="text-muted-foreground block text-[10px]">CURRENT SCORE</span>
-                    <span className="font-bold text-foreground">72 / 75 pts</span>
+                    <span className="font-bold text-foreground">
+                      {readinessValue} / {nextTier.min} pts
+                    </span>
                   </div>
                   <div>
                     <span className="text-muted-foreground block text-[10px]">POINTS TO NEXT LEVEL</span>
-                    <span className="font-bold text-foreground">3 pts</span>
+                    <span className="font-bold text-foreground">{pointsToNextTier} pts</span>
                   </div>
                 </div>
               </div>
@@ -140,7 +241,7 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
           </div>
 
           <div className="mt-6 border-t border-border pt-4">
-            <SkillUpgradeStepper currentStepIndex={2} />
+            <SkillUpgradeStepper currentStepIndex={pipelineStepIndex} />
           </div>
         </div>
 
@@ -158,7 +259,11 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
 
             <div className="flex items-center justify-center py-4">
               <CircularProgress
-                value={Math.round((verifiedSkillsCount / totalSkillsCount) * 100)}
+                value={
+                  totalSkillsCount > 0
+                    ? Math.round((verifiedSkillsCount / totalSkillsCount) * 100)
+                    : 0
+                }
                 size={140}
                 strokeWidth={10}
                 valueFormatter={() => `${verifiedSkillsCount}/${totalSkillsCount}`}
@@ -169,7 +274,8 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
             </div>
 
             <p className="text-xs text-muted-foreground text-center leading-relaxed">
-              7 skills verified through quizzes and projects. 3 important skills still need verification.
+              {verifiedSkillsCount} skill{verifiedSkillsCount === 1 ? '' : 's'} verified through quizzes and projects.{' '}
+              {remainingToVerify} important skill{remainingToVerify === 1 ? '' : 's'} still need verification.
             </p>
           </div>
 
@@ -178,9 +284,7 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
               <Calendar className="h-3 w-3" />
               <span>Next Skill Renewal:</span>
             </span>
-            <span className="font-bold">
-              {userSkills.find((s) => s.expiresAt)?.expiresAt || '2028-09-12'}
-            </span>
+            <span className="font-bold">{nextRenewalDate}</span>
           </div>
         </div>
       </div>
@@ -194,10 +298,14 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
               <span className="font-bold">Next Best Step · Recommended Action</span>
             </div>
             <h3 className="text-2xl font-extrabold tracking-tight sm:text-3xl text-white">
-              Complete Your Docker Container Project
+              {topPriorityGap
+                ? `Build & Verify ${topPriorityGap.skill.name}`
+                : `Advance Your ${targetCareer.title} Mastery`}
             </h3>
             <p className="text-xs text-indigo-100/90 leading-relaxed">
-              Docker is your biggest missing skill for Python Backend jobs. Finishing this course and submitting the project can move your score from 72% up to 76%.
+              {topPriorityGap
+                ? `${topPriorityGap.skill.name} is your highest-priority gap for ${targetCareer.title} roles. Finishing the course and passing the quiz can lift your score from ${readinessValue}% toward ${Math.min(100, readinessValue + 6)}%.`
+                : `You have covered all core requirements for ${targetCareer.title}. Submit a capstone project or take a timed quiz to raise your score further.`}
             </p>
           </div>
 
@@ -206,7 +314,11 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
               onClick={() => onNavigate('/roadmap')}
               className="inline-flex items-center justify-center gap-2 rounded-xl bg-white px-6 py-3.5 font-mono text-xs font-bold text-indigo-700 hover:bg-slate-50 transition-all shadow-lg shadow-black/10 hover:scale-105 active:scale-100"
             >
-              <span>Start Docker Course</span>
+              <span>
+                {topPriorityGap
+                  ? `Start ${topPriorityGap.skill.name.split(' ')[0]} Course`
+                  : 'Open Learning Roadmap'}
+              </span>
               <ArrowRight className="h-4 w-4" />
             </button>
           </div>
@@ -217,26 +329,40 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
         <StatCard
           title="Courses Completed"
-          value="68%"
-          sublabel="17 of 25 lessons finished"
+          value={`${courseCompletionPct}%`}
+          sublabel={`${completedLessons} of ${totalLessons} lessons finished`}
           icon={BookOpen}
         />
         <StatCard
           title="Projects Reviewed"
-          value="3 / 4"
-          sublabel="1 passed (38/50 score)"
+          value={`${passedProjects} / ${submissions.length}`}
+          sublabel={
+            latestPassedProject?.review
+              ? `${passedProjects} passed (${latestPassedProject.review.totalScore}/${latestPassedProject.review.maxScore} score)`
+              : submissions.length > 0
+                ? `${submissions.length} awaiting mentor review`
+                : 'No projects submitted yet'
+          }
           icon={FolderGit2}
         />
         <StatCard
           title="Quiz Average"
-          value="81%"
-          sublabel="3 timed quizzes passed"
+          value={attemptedQuizzes.length > 0 ? `${quizAverage}%` : '—'}
+          sublabel={
+            attemptedQuizzes.length > 0
+              ? `${passedQuizzesCount} timed quiz${passedQuizzesCount === 1 ? '' : 'zes'} passed`
+              : 'Take your first timed quiz'
+          }
           icon={CheckSquare}
         />
         <StatCard
           title="Certificates Earned"
-          value="3"
-          sublabel="Verified SkillForge proof"
+          value={String(certificates.length)}
+          sublabel={
+            certificates.length > 0
+              ? 'Verified SkillForge proof'
+              : 'Complete quizzes & projects to unlock'
+          }
           icon={Award}
         />
       </div>
@@ -245,7 +371,7 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
       <SkillDomainRadarChart
         userSkills={userSkills}
         targetCareer={targetCareer}
-        snapshots={domainSnapshots}
+        snapshots={domainSnapshots.length > 0 ? domainSnapshots : undefined}
         onNavigate={onNavigate}
       />
 
@@ -271,13 +397,13 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
               <div className="flex items-center justify-between text-xs font-mono">
                 <span className="font-semibold text-slate-800 dark:text-slate-200">Technical Skills (Weight: 35%)</span>
                 <span className="tabular-nums font-bold text-indigo-600 dark:text-indigo-400">
-                  {scoreData?.breakdown.technicalSkills || 78}%
+                  {breakdownTechnical}%
                 </span>
               </div>
               <div className="h-2 w-full rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
                 <div
                   className="h-full bg-indigo-600 dark:bg-indigo-500 rounded-full transition-all duration-500"
-                  style={{ width: `${scoreData?.breakdown.technicalSkills || 78}%` }}
+                  style={{ width: `${breakdownTechnical}%` }}
                 />
               </div>
             </div>
@@ -287,13 +413,13 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
               <div className="flex items-center justify-between text-xs font-mono">
                 <span className="font-semibold text-slate-800 dark:text-slate-200">Timed Assessments (Weight: 25%)</span>
                 <span className="tabular-nums font-bold text-blue-600 dark:text-blue-400">
-                  {scoreData?.breakdown.assessments || 81}%
+                  {breakdownAssessments}%
                 </span>
               </div>
               <div className="h-2 w-full rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
                 <div
                   className="h-full bg-blue-600 dark:bg-blue-500 rounded-full transition-all duration-500"
-                  style={{ width: `${scoreData?.breakdown.assessments || 81}%` }}
+                  style={{ width: `${breakdownAssessments}%` }}
                 />
               </div>
             </div>
@@ -303,13 +429,13 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
               <div className="flex items-center justify-between text-xs font-mono">
                 <span className="font-semibold text-slate-800 dark:text-slate-200">Mentor-Reviewed Projects (Weight: 25%)</span>
                 <span className="tabular-nums font-bold text-purple-600 dark:text-purple-400">
-                  {scoreData?.breakdown.projects || 76}%
+                  {breakdownProjects}%
                 </span>
               </div>
               <div className="h-2 w-full rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
                 <div
                   className="h-full bg-purple-600 dark:bg-purple-500 rounded-full transition-all duration-500"
-                  style={{ width: `${scoreData?.breakdown.projects || 76}%` }}
+                  style={{ width: `${breakdownProjects}%` }}
                 />
               </div>
             </div>
@@ -319,13 +445,13 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
               <div className="flex items-center justify-between text-xs font-mono">
                 <span className="font-semibold text-slate-800 dark:text-slate-200">Interview Readiness (Weight: 15%)</span>
                 <span className="tabular-nums font-bold text-amber-600 dark:text-amber-400">
-                  {scoreData?.breakdown.interviewPrep || 48}%
+                  {breakdownInterview}%
                 </span>
               </div>
               <div className="h-2 w-full rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
                 <div
                   className="h-full bg-amber-500 dark:bg-amber-400 rounded-full transition-all duration-500"
-                  style={{ width: `${scoreData?.breakdown.interviewPrep || 48}%` }}
+                  style={{ width: `${breakdownInterview}%` }}
                 />
               </div>
             </div>
@@ -344,9 +470,9 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
 
             {/* Simple Grayscale Trend Sparkline */}
             <div className="space-y-3">
-              <div className="flex items-end justify-between h-20 px-2 border-b border-border/80">
+              <div className="flex items-end justify-around h-20 px-2 border-b border-border/80">
                 {history.map((pt) => {
-                  const barHeight = Math.max(15, (pt.score / 100) * 70);
+                  const barHeight = Math.max(10, (pt.score / 100) * 70);
                   return (
                     <div key={pt.date} className="flex flex-col items-center gap-1.5">
                       <span className="text-[10px] font-mono font-bold">{pt.score}%</span>
@@ -362,7 +488,7 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
                 })}
               </div>
               <p className="text-[11px] text-muted-foreground text-center font-mono">
-                +24 pts growth over 3 months of verified projects and quizzes
+                {trendCaption}
               </p>
             </div>
           </div>
@@ -392,7 +518,7 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
         <div>
           <div className="flex items-center justify-between mb-1">
             <h3 className="text-sm font-bold uppercase font-mono tracking-wider">
-              Skills Needed for Python Backend Jobs
+              Skills Needed for {targetCareer.title} Jobs
             </h3>
             <button
               onClick={() => onNavigate('/skill-gap')}
@@ -415,78 +541,86 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
             </span>
           </div>
 
-          <div className="divide-y divide-border/60 rounded-lg border border-border overflow-hidden">
-            {criticalGaps.map((gap) => (
-              <div
-                key={gap.skill.id}
-                className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-surface hover:bg-secondary/40 transition-colors"
-              >
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-foreground">{gap.skill.name}</span>
-                    <span className="rounded border border-foreground/40 px-1.5 py-0.2 text-[10px] font-mono uppercase font-semibold">
-                      PRIORITY
-                    </span>
+          {criticalGaps.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-border p-4 text-xs text-muted-foreground">
+              All critical role skills are currently met!
+            </div>
+          ) : (
+            <div className="divide-y divide-border/60 rounded-lg border border-border overflow-hidden">
+              {criticalGaps.map((gap) => (
+                <div
+                  key={gap.skill.id}
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-surface hover:bg-secondary/40 transition-colors"
+                >
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-foreground">{gap.skill.name}</span>
+                      <span className="rounded border border-foreground/40 px-1.5 py-0.2 text-[10px] font-mono uppercase font-semibold">
+                        PRIORITY
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground max-w-md">{gap.skill.description}</p>
                   </div>
-                  <p className="text-[11px] text-muted-foreground max-w-md">{gap.skill.description}</p>
-                </div>
 
-                <div className="flex items-center gap-4">
-                  <div className="w-32">
-                    <SkillLevelMeter level={gap.current} targetLevel={gap.required} size="sm" />
+                  <div className="flex items-center gap-4">
+                    <div className="w-32">
+                      <SkillLevelMeter level={gap.current} targetLevel={gap.required} size="sm" />
+                    </div>
+                    <button
+                      onClick={() => onNavigate('/roadmap')}
+                      className="shrink-0 rounded border border-foreground px-2.5 py-1 text-xs font-mono hover:bg-foreground hover:text-background transition-colors"
+                    >
+                      Study →
+                    </button>
                   </div>
-                  <button
-                    onClick={() => onNavigate('/roadmap')}
-                    className="shrink-0 rounded border border-foreground px-2.5 py-1 text-xs font-mono hover:bg-foreground hover:text-background transition-colors"
-                  >
-                    Study →
-                  </button>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Other Skills to Improve Section */}
-        <div className="space-y-3 pt-2">
-          <div className="flex items-center gap-2">
-            <span className="h-1.5 w-1.5 rounded-full border border-foreground" />
-            <span className="text-xs font-mono font-bold uppercase tracking-wider text-muted-foreground">
-              Other Skills to Improve ({secondaryGaps.length})
-            </span>
-          </div>
+        {secondaryGaps.length > 0 && (
+          <div className="space-y-3 pt-2">
+            <div className="flex items-center gap-2">
+              <span className="h-1.5 w-1.5 rounded-full border border-foreground" />
+              <span className="text-xs font-mono font-bold uppercase tracking-wider text-muted-foreground">
+                Other Skills to Improve ({secondaryGaps.length})
+              </span>
+            </div>
 
-          <div className="divide-y divide-border/60 rounded-lg border border-border/80 overflow-hidden">
-            {secondaryGaps.map((gap) => (
-              <div
-                key={gap.skill.id}
-                className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-card"
-              >
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-medium text-foreground">{gap.skill.name}</span>
-                    <span className="text-[10px] font-mono text-muted-foreground uppercase">
-                      Optional
-                    </span>
+            <div className="divide-y divide-border/60 rounded-lg border border-border/80 overflow-hidden">
+              {secondaryGaps.map((gap) => (
+                <div
+                  key={gap.skill.id}
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-card"
+                >
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-foreground">{gap.skill.name}</span>
+                      <span className="text-[10px] font-mono text-muted-foreground uppercase">
+                        Optional
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">{gap.skill.description}</p>
                   </div>
-                  <p className="text-[11px] text-muted-foreground">{gap.skill.description}</p>
-                </div>
 
-                <div className="flex items-center gap-4">
-                  <div className="w-32">
-                    <SkillLevelMeter level={gap.current} targetLevel={gap.required} size="sm" />
+                  <div className="flex items-center gap-4">
+                    <div className="w-32">
+                      <SkillLevelMeter level={gap.current} targetLevel={gap.required} size="sm" />
+                    </div>
+                    <button
+                      onClick={() => onNavigate('/roadmap')}
+                      className="shrink-0 rounded border border-border px-2.5 py-1 text-xs font-mono hover:bg-secondary transition-colors text-muted-foreground"
+                    >
+                      View
+                    </button>
                   </div>
-                  <button
-                    onClick={() => onNavigate('/roadmap')}
-                    className="shrink-0 rounded border border-border px-2.5 py-1 text-xs font-mono hover:bg-secondary transition-colors text-muted-foreground"
-                  >
-                    View
-                  </button>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

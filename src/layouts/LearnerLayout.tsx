@@ -69,7 +69,7 @@ export function LearnerLayout({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [cmdOpen, setCmdOpen] = useState(false);
 
-  const readinessScore = scoreData?.overall ?? 72;
+  const readinessScore = scoreData?.overall ?? 0;
   const targetCareer =
     mockCareers.find((c) => c.id === profile?.targetCareerId)?.title || 'Python Backend Developer';
 

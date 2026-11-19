@@ -28,6 +28,7 @@ interface OnboardingScreenProps {
 
 export function OnboardingScreen({ onNavigate }: OnboardingScreenProps) {
   const user = useAuthStore((state) => state.user);
+  const existingProfile = useAuthStore((state) => state.profile);
   const setProfile = useAuthStore((state) => state.setProfile);
   const { isDark, toggleTheme } = useThemeStore();
 
@@ -35,57 +36,29 @@ export function OnboardingScreen({ onNavigate }: OnboardingScreenProps) {
   const [careers, setCareers] = useState<CareerRole[]>([]);
   const [skillCatalog, setSkillCatalog] = useState<Skill[]>([]);
 
-  // Form State
+  // Form State (clean defaults per user — never pre-filled with another user's info)
   const [formData, setFormData] = useState({
-    name: user?.name || 'Rahul Sharma',
-    email: user?.email || 'rahul.sharma@skillforge.io',
-    phone: '+1 (555) 234-8901',
-    location: 'San Francisco, CA',
-    education: 'B.S. in Computer Science',
-    currentJob: 'Junior Software Engineer Intern',
-    yearsExperience: 1,
-    resumeName: '',
-    resumeSize: undefined as number | undefined,
-    resumeUploadedAt: '',
-    resumeUrl: '',
-    githubUrl: 'https://github.com/rahulsharma-dev',
-    linkedinUrl: 'https://linkedin.com/in/rahulsharma-backend',
-    portfolioUrl: 'https://rahulsharma.dev',
-    targetCareerId: 'career_py_backend',
+    name: user?.name || '',
+    email: user?.email || '',
+    phone: existingProfile?.phone || '',
+    location: existingProfile?.location || '',
+    education: existingProfile?.education || '',
+    currentJob: existingProfile?.currentJob || '',
+    yearsExperience: existingProfile?.yearsExperience ?? 0,
+    resumeName: existingProfile?.resumeFileName || '',
+    resumeSize: existingProfile?.resumeFileSize as number | undefined,
+    resumeUploadedAt: existingProfile?.resumeUploadedAt || '',
+    resumeUrl: existingProfile?.resumeUrl || '',
+    githubUrl: existingProfile?.githubUrl || '',
+    linkedinUrl: existingProfile?.linkedinUrl || '',
+    portfolioUrl: existingProfile?.portfolioUrl || '',
+    targetCareerId: existingProfile?.targetCareerId || 'career_py_backend',
   });
 
-  // Dynamic Skill Selector State
+  // Dynamic Skill Selector State (starts clean so each learner picks their own starting skills)
   const [selectedSkills, setSelectedSkills] = useState<
     Array<{ skill: Skill; level: SkillLevel }>
-  >([
-    {
-      skill: {
-        id: 'sk_py',
-        name: 'Python Core & Advanced',
-        category: 'Programming',
-        description: 'Metaclasses, generators, async IO, memory management',
-      },
-      level: 'Advanced',
-    },
-    {
-      skill: {
-        id: 'sk_fastapi',
-        name: 'FastAPI Framework',
-        category: 'Backend',
-        description: 'Pydantic schemas, dependency injection, async request handling',
-      },
-      level: 'Intermediate',
-    },
-    {
-      skill: {
-        id: 'sk_docker',
-        name: 'Docker & Containerization',
-        category: 'DevOps',
-        description: 'Multi-stage builds, Docker Compose, container lifecycle',
-      },
-      level: 'Beginner',
-    },
-  ]);
+  >([]);
 
   const [skillSearchQuery, setSkillSearchQuery] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -631,7 +604,7 @@ export function OnboardingScreen({ onNavigate }: OnboardingScreenProps) {
               </button>
               <button
                 onClick={handleSubmit}
-                disabled={isSubmitting || selectedSkills.length === 0}
+                disabled={isSubmitting}
                 className="inline-flex items-center gap-2 rounded bg-foreground px-6 py-2.5 text-xs font-bold text-background hover:bg-foreground/90 transition-colors disabled:opacity-50"
               >
                 {isSubmitting ? 'Saving Profile...' : 'Finish Setup & Go to Dashboard'}

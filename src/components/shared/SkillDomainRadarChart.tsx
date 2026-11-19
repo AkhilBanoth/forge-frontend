@@ -15,7 +15,6 @@ import type {
   SkillLevel,
   UserSkill,
 } from '../../types';
-import { mockDomainRadarSnapshots } from '../../lib/mocks/data';
 import { ArrowRight, CheckCircle2, Compass, Layers, Target, Users } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
@@ -61,20 +60,19 @@ function getLearnerSkillScore(userSkill?: UserSkill): number {
 export function SkillDomainRadarChart({
   userSkills,
   targetCareer,
-  snapshots = mockDomainRadarSnapshots,
+  snapshots,
   onNavigate,
 }: SkillDomainRadarChartProps) {
   const [activeSnapshotId, setActiveSnapshotId] = useState<'current' | 'baseline' | 'projected'>('current');
   const [showTargetOverlay, setShowTargetOverlay] = useState(true);
   const [showCohortOverlay, setShowCohortOverlay] = useState(false);
 
+  const effectiveSnapshots = snapshots && snapshots.length > 0 ? snapshots : [];
   const selectedSnapshot =
-    snapshots.find((s) => s.id === activeSnapshotId) || snapshots[0] || mockDomainRadarSnapshots[0];
+    effectiveSnapshots.find((s) => s.id === activeSnapshotId) || effectiveSnapshots[0];
 
   const domainMetrics = useMemo<DomainSkillMetric[]>(() => {
-    // Use the dedicated mock snapshot metrics for baseline/projected views,
-    // or for the default Python Backend role when userSkills match the baseline mock set.
-    if (activeSnapshotId !== 'current' || targetCareer.id === 'career_py_backend') {
+    if (selectedSnapshot && selectedSnapshot.metrics.length > 0) {
       return selectedSnapshot.metrics;
     }
 
@@ -135,7 +133,7 @@ export function SkillDomainRadarChart({
         skills.reduce((acc, s) => acc + s.target, 0) / Math.max(1, totalSkills)
       );
       const verifiedCount = skills.filter((s) => s.verified).length;
-      const cohortLookup = selectedSnapshot.metrics.find((m) => m.domain === domain);
+      const cohortLookup = selectedSnapshot?.metrics.find((m) => m.domain === domain);
       return {
         domain,
         learnerScore,
@@ -175,14 +173,14 @@ export function SkillDomainRadarChart({
           <p className="text-xs text-muted-foreground">
             {activeSnapshotId === 'current'
               ? `See where you stand across ${domainMetrics.length} technical areas compared to ${targetCareer.title} requirements.`
-              : selectedSnapshot.description}
+              : selectedSnapshot?.description || `Compare your skills against ${targetCareer.title} requirements.`}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Mock Snapshot Selector */}
+          {/* Snapshot Selector */}
           <div className="inline-flex items-center rounded-lg border border-border bg-surface p-0.5 font-mono text-[11px]">
-            {snapshots.map((snap) => (
+            {effectiveSnapshots.map((snap) => (
               <button
                 key={snap.id}
                 type="button"
@@ -369,7 +367,7 @@ export function SkillDomainRadarChart({
           <div className="flex flex-wrap items-center justify-center gap-6 pt-2 text-xs font-mono">
             <div className="flex items-center gap-2">
               <span className="h-3 w-3 rounded-sm bg-primary/30 border-2 border-primary" />
-              <span className="font-semibold text-foreground">{selectedSnapshot.label}</span>
+              <span className="font-semibold text-foreground">{selectedSnapshot?.label || 'Current'}</span>
             </div>
             {showTargetOverlay && (
               <div className="flex items-center gap-2">
@@ -395,10 +393,10 @@ export function SkillDomainRadarChart({
                 Strongest Domain
               </span>
               <div className="font-bold text-sm text-foreground truncate">
-                {strongestDomain?.domain || 'Programming'}
+                {strongestDomain?.domain || 'Not Started'}
               </div>
               <span className="font-mono text-xs font-bold text-primary">
-                {strongestDomain?.learnerScore ?? 92}% avg
+                {strongestDomain?.learnerScore ?? 0}% avg
               </span>
             </div>
 

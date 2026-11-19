@@ -19,6 +19,7 @@ const PUBLIC_NAV_LINKS = [
   { label: 'Pricing', href: '/pricing' },
   { label: 'Verify', href: '/verify' },
   { label: 'Contact', href: '/contact' },
+  { label: 'PPT Deck', href: '/presentation' },
 ];
 
 export function PublicLayout({ currentPath, onNavigate, children }: PublicLayoutProps) {

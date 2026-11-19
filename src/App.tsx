@@ -20,6 +20,7 @@ import { RegisterPage } from './pages/public/RegisterPage';
 import { ForbiddenPage } from './pages/public/ForbiddenPage';
 import { NotFoundPage } from './pages/public/NotFoundPage';
 import { TermsPage, PrivacyPage } from './pages/public/LegalPages';
+import { PresentationPage } from './pages/public/PresentationPage';
 
 // Learner Pages (/app/*)
 import { LearnerDashboardPage } from './pages/learner/LearnerDashboardPage';
@@ -117,6 +118,9 @@ function AppRoutes() {
   }
   if (normPath === '/privacy') {
     return <PrivacyPage currentPath={normPath} onNavigate={navigate} />;
+  }
+  if (normPath === '/presentation') {
+    return <PresentationPage onNavigate={navigate} />;
   }
   if (normPath === '/verify') {
     return <VerifyCertificatePage currentPath={normPath} onNavigate={navigate} />;

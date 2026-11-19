@@ -59,6 +59,10 @@ export function ReadinessPage({ onNavigate }: ReadinessPageProps) {
     },
   ];
 
+  const nextTier =
+    READINESS_THRESHOLDS.find((t) => t.min > scoreData.overall) ||
+    READINESS_THRESHOLDS[READINESS_THRESHOLDS.length - 1];
+
   return (
     <div className="space-y-8">
       <PageHeader
@@ -71,10 +75,13 @@ export function ReadinessPage({ onNavigate }: ReadinessPageProps) {
         <Info className="h-5 w-5 text-primary shrink-0 mt-0.5" />
         <div className="space-y-1 text-xs sm:text-sm">
           <p className="font-bold text-foreground">
-            Based on your SkillForge data, you appear ready for junior roles.
+            {scoreData.advisorySummary ||
+              (scoreData.overall >= 60
+                ? 'Based on your SkillForge data, you appear ready for junior roles.'
+                : 'Build your verified profile by taking timed quizzes and submitting mentor-reviewed projects.')}
           </p>
           <p className="text-xs text-muted-foreground">
-            {scoreData.advisorySummary || ADVISORY_DISCLAIMERS.noGuaranteeRule}
+            {ADVISORY_DISCLAIMERS.noGuaranteeRule}
           </p>
         </div>
       </div>
@@ -112,7 +119,7 @@ export function ReadinessPage({ onNavigate }: ReadinessPageProps) {
             <div className="flex items-center justify-between">
               <span className="text-muted-foreground">Next Level</span>
               <span className="font-mono font-bold text-primary">
-                Strong Candidate (75%+)
+                {nextTier.label} ({nextTier.min}%+)
               </span>
             </div>
           </div>

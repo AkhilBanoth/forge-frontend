@@ -2,15 +2,17 @@ import { useState, useEffect } from 'react';
 import type { ReadinessScore, CareerMatch, DomainRadarSnapshot } from '../types';
 import { readinessService } from '../lib/api/services';
 import { READINESS_THRESHOLDS } from '../constants';
-import { mockDomainRadarSnapshots } from '../lib/mocks/data';
+import { useAuthStore } from '../stores/authStore';
 
 export function useReadiness() {
+  const userId = useAuthStore((state) => state.user?.id);
+  const targetCareerId = useAuthStore((state) => state.profile?.targetCareerId);
+  const isProfileComplete = useAuthStore((state) => state.profile?.isProfileComplete);
+
   const [scoreData, setScoreData] = useState<ReadinessScore | null>(null);
   const [history, setHistory] = useState<Array<{ date: string; score: number; level: string }>>([]);
   const [matches, setMatches] = useState<CareerMatch[]>([]);
-  const [domainSnapshots, setDomainSnapshots] = useState<DomainRadarSnapshot[]>(
-    mockDomainRadarSnapshots
-  );
+  const [domainSnapshots, setDomainSnapshots] = useState<DomainRadarSnapshot[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,7 +46,7 @@ export function useReadiness() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [userId, targetCareerId, isProfileComplete]);
 
   const currentTier = scoreData
     ? READINESS_THRESHOLDS.find(

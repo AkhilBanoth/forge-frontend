@@ -52,6 +52,14 @@ import {
   type LearnerDossier,
 } from '../mocks/data';
 import { SKILL_LEVEL_ORDER } from '../../constants';
+import {
+  computeDomainSnapshotsForWorkspace,
+  computeReadinessScoreForWorkspace,
+  getCurrentMonthLabel,
+  getOrCreateWorkspace,
+  saveWorkspace,
+  type LearnerWorkspaceState,
+} from '../state/userWorkspace';
 
 function wrapResponse<T>(data: T, message = 'Success'): ApiEnvelope<T> {
   return {
@@ -252,6 +260,77 @@ function resolveMockUserFromToken(token?: string | null): User {
   return mockUser;
 }
 
+function getActiveMockUser(tokenOverride?: string | null): User {
+  if (tokenOverride) return resolveMockUserFromToken(tokenOverride);
+  try {
+    const persisted = localStorage.getItem('skillforge_auth');
+    if (persisted) {
+      const parsed = JSON.parse(persisted);
+      const userObj = parsed?.state?.user;
+      if (userObj && typeof userObj.id === 'string') {
+        return userObj as User;
+      }
+      const token = parsed?.state?.token;
+      if (typeof token === 'string') {
+        return resolveMockUserFromToken(token);
+      }
+    }
+  } catch {
+    // Ignore localStorage errors.
+  }
+  return mockUser;
+}
+
+function getActiveWorkspace(tokenOverride?: string | null): LearnerWorkspaceState {
+  const activeUser = getActiveMockUser(tokenOverride);
+  return getOrCreateWorkspace({
+    userId: activeUser.id,
+    userName: activeUser.name,
+    userEmail: activeUser.email,
+    careers: liveCareers,
+  });
+}
+
+function syncWorkspaceRecord(ws: LearnerWorkspaceState): void {
+  const targetCareer =
+    liveCareers.find((c) => c.id === ws.profile.targetCareerId) || liveCareers[0];
+  const readiness = computeReadinessScoreForWorkspace(ws, targetCareer);
+
+  // Keep latest readiness history point in sync
+  const monthLabel = getCurrentMonthLabel();
+  if (ws.readinessHistory.length === 0) {
+    ws.readinessHistory = [{ date: monthLabel, score: readiness.overall, level: readiness.level }];
+  } else {
+    const last = ws.readinessHistory[ws.readinessHistory.length - 1];
+    if (last.date === monthLabel || !ws.isDemoSeed) {
+      ws.readinessHistory = [
+        ...ws.readinessHistory.slice(0, -1),
+        { date: last.date || monthLabel, score: readiness.overall, level: readiness.level },
+      ];
+    }
+  }
+
+  saveWorkspace(ws);
+
+  // Sync summary stats back to managed users directory
+  const updateRecord = (u: ManagedUserRecord): ManagedUserRecord =>
+    u.id === ws.userId
+      ? {
+          ...u,
+          targetCareer: targetCareer.title,
+          readinessScore: readiness.overall,
+          verifiedSkillsCount: readiness.verifiedSkillsCount,
+        }
+      : u;
+
+  liveManagedUsers = liveManagedUsers.map(updateRecord);
+  const persisted = loadPersistedMockUsers();
+  const matched = persisted.find((u) => u.id === ws.userId);
+  if (matched) {
+    savePersistedMockUser(updateRecord(matched));
+  }
+}
+
 
 function mapBackendUser(raw: {
   id: number | string;
@@ -363,30 +442,50 @@ export const authService = {
           createdAt: managedRecord.registeredDate,
         };
 
+        const ws =
+          role === 'LEARNER'
+            ? getOrCreateWorkspace({
+                userId: matchedUser.id,
+                userName: matchedUser.name,
+                userEmail: matchedUser.email,
+                careers: liveCareers,
+              })
+            : null;
+
         return wrapResponse({
           token: `mock_jwt_token_${role.toLowerCase()}_${managedRecord.id}`,
           refreshToken: `mock_refresh_token_${role.toLowerCase()}_${managedRecord.id}`,
           user: matchedUser,
-          profile: role === 'LEARNER' ? liveProfile : null,
+          profile: ws ? ws.profile : null,
         });
       }
 
+      const isRahul = email === 'rahul.sharma@skillforge.io';
+      const derivedId = isRahul
+        ? 'usr_rahul_01'
+        : `usr_${email.replace(/[^a-z0-9]/g, '_')}`;
       const learnerUser: User = {
-        id: 'usr_rahul_01',
+        id: derivedId,
         email,
-        name: email === 'rahul.sharma@skillforge.io'
-          ? 'Rahul Sharma'
-          : email.split('@')[0],
+        name: isRahul ? 'Rahul Sharma' : email.split('@')[0],
         roles: ['LEARNER'],
         isActive: true,
-        createdAt: '2026-06-15T09:00:00Z',
+        createdAt: isRahul ? '2026-06-15T09:00:00Z' : new Date().toISOString(),
       };
 
+      const ws = getOrCreateWorkspace({
+        userId: learnerUser.id,
+        userName: learnerUser.name,
+        userEmail: learnerUser.email,
+        isProfileComplete: isRahul,
+        careers: liveCareers,
+      });
+
       return wrapResponse({
-        token: 'mock_jwt_token_learner_2026',
-        refreshToken: 'mock_refresh_token_learner_2026',
+        token: `mock_jwt_token_learner_${learnerUser.id}`,
+        refreshToken: `mock_refresh_token_learner_${learnerUser.id}`,
         user: learnerUser,
-        profile: liveProfile,
+        profile: ws.profile,
       });
     }
 
@@ -418,8 +517,10 @@ export const authService = {
     if (USE_MOCKS) {
       await new Promise((r) => setTimeout(r, 150));
 
-      const exists = liveManagedUsers.some(
-        (u) => u.email.toLowerCase() === payload.email.trim().toLowerCase()
+      const normalizedEmail = payload.email.trim().toLowerCase();
+      const allUsers = [...loadPersistedMockUsers(), ...liveManagedUsers];
+      const exists = allUsers.some(
+        (u) => u.email.toLowerCase() === normalizedEmail
       );
 
       if (exists) {
@@ -429,19 +530,21 @@ export const authService = {
       const newUser: User = {
         id: `usr_${Date.now()}`,
         name: payload.name.trim(),
-        email: payload.email.trim().toLowerCase(),
+        email: normalizedEmail,
         roles: ['LEARNER'],
         isActive: true,
         createdAt: new Date().toISOString(),
       };
 
-      const newProfile: LearnerProfile = {
+      const targetCareerId = payload.targetCareerId || 'career_py_backend';
+      const ws = getOrCreateWorkspace({
         userId: newUser.id,
-        targetCareerId: payload.targetCareerId || 'career_py_backend',
+        userName: newUser.name,
+        userEmail: newUser.email,
+        targetCareerId,
         isProfileComplete: false,
-      };
-
-      liveProfile = newProfile;
+        careers: liveCareers,
+      });
 
       const createdRecord: ManagedUserRecord = {
         id: newUser.id,
@@ -449,22 +552,23 @@ export const authService = {
         email: newUser.email,
         roles: ['LEARNER'],
         isActive: true,
-        targetCareer: liveCareers.find(
-          (c) => c.id === newProfile.targetCareerId
-        )?.title || 'Python Backend Developer',
-        readinessScore: 25,
+        targetCareer:
+          liveCareers.find((c) => c.id === targetCareerId)?.title ||
+          'Python Backend Developer',
+        readinessScore: 0,
         verifiedSkillsCount: 0,
         registeredDate: new Date().toISOString().split('T')[0],
       };
 
       liveManagedUsers.unshift(createdRecord);
       savePersistedMockUser(createdRecord);
+      saveWorkspace(ws);
 
       return wrapResponse({
         token: `mock_jwt_token_learner_${newUser.id}`,
         refreshToken: `mock_refresh_token_learner_${newUser.id}`,
         user: newUser,
-        profile: newProfile,
+        profile: ws.profile,
       });
     }
 
@@ -529,10 +633,18 @@ export const authService = {
       await new Promise((r) => setTimeout(r, 120));
 
       const resolved = resolveMockUserFromToken(tokenOverride);
+      const ws = resolved.roles.includes('LEARNER')
+        ? getOrCreateWorkspace({
+            userId: resolved.id,
+            userName: resolved.name,
+            userEmail: resolved.email,
+            careers: liveCareers,
+          })
+        : null;
 
       return wrapResponse({
         user: resolved,
-        profile: resolved.roles.includes('LEARNER') ? liveProfile : null,
+        profile: ws ? ws.profile : null,
       });
     }
 
@@ -551,34 +663,69 @@ export const authService = {
 
 export const userService = {
   async getProfile(): Promise<ApiEnvelope<LearnerProfile>> {
-    if (isMockSessionActive()) return wrapResponse(liveProfile);
+    if (isMockSessionActive()) {
+      const ws = getActiveWorkspace();
+      return wrapResponse({ ...ws.profile });
+    }
     const res = await apiClient.get<ApiEnvelope<LearnerProfile>>('/users/me');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
 
   async updateProfile(profileData: Partial<LearnerProfile>): Promise<ApiEnvelope<LearnerProfile>> {
     if (isMockSessionActive()) {
-      liveProfile = { ...liveProfile, ...profileData, isProfileComplete: true };
-      return wrapResponse(liveProfile);
+      const ws = getActiveWorkspace();
+      ws.profile = { ...ws.profile, ...profileData, userId: ws.userId, isProfileComplete: true };
+      if (
+        profileData.targetCareerId &&
+        ws.aiMessages.length === 1 &&
+        ws.aiMessages[0].id.startsWith('ai_welcome_') &&
+        ws.aiMessages[0].type === 'text'
+      ) {
+        const career =
+          liveCareers.find((c) => c.id === ws.profile.targetCareerId) || liveCareers[0];
+        const firstName = (ws.userName || 'there').split(' ')[0];
+        ws.aiMessages[0] = {
+          ...ws.aiMessages[0],
+          content: `Welcome to SkillForge, ${firstName}! Your workspace is set up for ${career?.title || 'your target role'}. Add your starting skills, explore your Skill Gaps, or ask me for a study plan and practice questions anytime.`,
+        };
+      }
+      syncWorkspaceRecord(ws);
+      return wrapResponse({ ...ws.profile });
     }
     throw { message: 'Profile updates are not available in the current backend API.', status: 501 };
   },
 
   async getUserSkills(): Promise<ApiEnvelope<UserSkill[]>> {
-    if (isMockSessionActive()) return wrapResponse([...liveUserSkills]);
+    if (isMockSessionActive()) {
+      const ws = getActiveWorkspace();
+      return wrapResponse([...ws.skills]);
+    }
     const res = await apiClient.get<ApiEnvelope<UserSkill[]>>('/users/me/skills');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
 
   async addSkill(skill: Omit<UserSkill, 'id' | 'userId'>): Promise<ApiEnvelope<UserSkill>> {
     if (isMockSessionActive()) {
+      const ws = getActiveWorkspace();
+      const existingIndex = ws.skills.findIndex((s) => s.skillId === skill.skillId);
+      if (existingIndex >= 0) {
+        const updated: UserSkill = {
+          ...ws.skills[existingIndex],
+          level: skill.level,
+          skill: skill.skill,
+        };
+        ws.skills[existingIndex] = updated;
+        syncWorkspaceRecord(ws);
+        return wrapResponse(updated);
+      }
       const newSkill: UserSkill = {
         ...skill,
-        id: `usk_${Date.now()}`,
-        userId: mockUser.id,
+        id: `usk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        userId: ws.userId,
         verificationStatus: 'SELF_DECLARED',
       };
-      liveUserSkills.push(newSkill);
+      ws.skills.push(newSkill);
+      syncWorkspaceRecord(ws);
       return wrapResponse(newSkill);
     }
     const res = await apiClient.post<ApiEnvelope<UserSkill>>('/users/me/skills', skill);
@@ -587,10 +734,12 @@ export const userService = {
 
   async updateSkillLevel(skillRecordId: string, level: SkillLevel): Promise<ApiEnvelope<UserSkill>> {
     if (isMockSessionActive()) {
-      liveUserSkills = liveUserSkills.map((s) =>
+      const ws = getActiveWorkspace();
+      ws.skills = ws.skills.map((s) =>
         s.id === skillRecordId ? { ...s, level, verificationStatus: 'SELF_DECLARED' } : s
       );
-      const updated = liveUserSkills.find((s) => s.id === skillRecordId) || liveUserSkills[0];
+      syncWorkspaceRecord(ws);
+      const updated = ws.skills.find((s) => s.id === skillRecordId) || ws.skills[0];
       return wrapResponse(updated);
     }
     throw { message: 'Updating a declared skill is not available in the current backend API.', status: 501 };
@@ -598,7 +747,9 @@ export const userService = {
 
   async removeSkill(skillRecordId: string): Promise<ApiEnvelope<{ id: string }>> {
     if (isMockSessionActive()) {
-      liveUserSkills = liveUserSkills.filter((s) => s.id !== skillRecordId);
+      const ws = getActiveWorkspace();
+      ws.skills = ws.skills.filter((s) => s.id !== skillRecordId);
+      syncWorkspaceRecord(ws);
       return wrapResponse({ id: skillRecordId });
     }
     throw { message: 'Removing a declared skill is not available in the current backend API.', status: 501 };
@@ -623,8 +774,22 @@ export const careerService = {
 
   async selectTargetCareer(careerId: string): Promise<ApiEnvelope<LearnerProfile>> {
     if (isMockSessionActive()) {
-      liveProfile = { ...liveProfile, targetCareerId: careerId };
-      return wrapResponse(liveProfile);
+      const ws = getActiveWorkspace();
+      ws.profile = { ...ws.profile, targetCareerId: careerId };
+      if (
+        ws.aiMessages.length === 1 &&
+        ws.aiMessages[0].id.startsWith('ai_welcome_') &&
+        ws.aiMessages[0].type === 'text'
+      ) {
+        const career = liveCareers.find((c) => c.id === careerId) || liveCareers[0];
+        const firstName = (ws.userName || 'there').split(' ')[0];
+        ws.aiMessages[0] = {
+          ...ws.aiMessages[0],
+          content: `Welcome to SkillForge, ${firstName}! Your workspace is set up for ${career?.title || 'your target role'}. Add your starting skills, explore your Skill Gaps, or ask me for a study plan and practice questions anytime.`,
+        };
+      }
+      syncWorkspaceRecord(ws);
+      return wrapResponse({ ...ws.profile });
     }
     throw { message: 'Target-career selection is not available in the current backend API.', status: 501 };
   },
@@ -681,8 +846,9 @@ export const careerService = {
 export const skillGapService = {
   async getSkillGaps(): Promise<ApiEnvelope<SkillGap[]>> {
     if (isMockSessionActive()) {
-      const target = liveCareers.find((c) => c.id === liveProfile.targetCareerId) || liveCareers[0];
-      return wrapResponse(computeGapsForCareer(target, liveUserSkills));
+      const ws = getActiveWorkspace();
+      const target = liveCareers.find((c) => c.id === ws.profile.targetCareerId) || liveCareers[0];
+      return wrapResponse(computeGapsForCareer(target, ws.skills));
     }
     const careersResponse = await apiClient.get('/careers');
     const careers = (careersResponse.data as any)?.data ?? careersResponse.data;
@@ -694,7 +860,14 @@ export const skillGapService = {
 
 export const roadmapService = {
   async getRoadmap(): Promise<ApiEnvelope<RoadmapPhase[]>> {
-    if (isMockSessionActive()) return wrapResponse([...livePhases]);
+    if (isMockSessionActive()) {
+      const activeUser = getActiveMockUser();
+      if (activeUser.roles.includes('ADMIN') || activeUser.roles.includes('MENTOR')) {
+        return wrapResponse([...livePhases]);
+      }
+      const ws = getActiveWorkspace();
+      return wrapResponse([...ws.phases]);
+    }
     const careersResponse = await apiClient.get('/careers');
     const careers = (careersResponse.data as any)?.data ?? careersResponse.data;
     if (!Array.isArray(careers) || careers.length === 0) return wrapResponse([]);
@@ -712,7 +885,8 @@ export const roadmapService = {
 
   async completeLesson(lessonId: string): Promise<ApiEnvelope<{ lessonId: string; status: 'COMPLETED' }>> {
     if (isMockSessionActive()) {
-      for (const phase of livePhases) {
+      const ws = getActiveWorkspace();
+      for (const phase of ws.phases) {
         for (const course of phase.courses) {
           for (const mod of course.modules) {
             const match = mod.lessons.find((l) => l.id === lessonId);
@@ -725,6 +899,7 @@ export const roadmapService = {
           }
         }
       }
+      syncWorkspaceRecord(ws);
       return wrapResponse({ lessonId, status: 'COMPLETED' });
     }
     const roadmap = await roadmapService.getRoadmap();
@@ -744,14 +919,22 @@ export const roadmapService = {
 
 export const assessmentService = {
   async getAssessments(): Promise<ApiEnvelope<Assessment[]>> {
-    if (isMockSessionActive()) return wrapResponse([...liveAssessments]);
+    if (isMockSessionActive()) {
+      const activeUser = getActiveMockUser();
+      if (activeUser.roles.includes('ADMIN') || activeUser.roles.includes('MENTOR')) {
+        return wrapResponse([...liveAssessments]);
+      }
+      const ws = getActiveWorkspace();
+      return wrapResponse([...ws.assessments]);
+    }
     const res = await apiClient.get<ApiEnvelope<Assessment[]>>('/assessments');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
 
   async getAssessmentById(id: string): Promise<ApiEnvelope<Assessment>> {
     if (isMockSessionActive()) {
-      const match = liveAssessments.find((a) => a.id === id) || liveAssessments[1] || liveAssessments[0];
+      const ws = getActiveWorkspace();
+      const match = ws.assessments.find((a) => a.id === id) || ws.assessments[1] || ws.assessments[0];
       return wrapResponse(match);
     }
     const res = await apiClient.get<ApiEnvelope<Assessment>>(`/assessments/${id}`);
@@ -765,15 +948,65 @@ export const assessmentService = {
   ): Promise<ApiEnvelope<AssessmentResult>> {
     if (isMockSessionActive()) {
       await new Promise((r) => setTimeout(r, 450));
-      const target = liveAssessments.find((a) => a.id === id) || liveAssessments[1];
-      if (target) {
-        target.previousScore = 93;
-        target.previousPassed = true;
+      const ws = getActiveWorkspace();
+      const target = ws.assessments.find((a) => a.id === id) || ws.assessments[1] || ws.assessments[0];
+      const totalQ = target?.questions?.length || 1;
+      let correctCount = 0;
+      if (target?.questions?.length) {
+        for (const q of target.questions) {
+          const picked = answers[q.id] || [];
+          const expected = q.correctAnswers || [];
+          if (
+            picked.length === expected.length &&
+            expected.every((idx: number) => picked.includes(idx))
+          ) {
+            correctCount += 1;
+          }
+        }
       }
+      const computedScore =
+        Object.keys(answers).length > 0 && target?.questions?.length
+          ? Math.max(40, Math.round((correctCount / totalQ) * 100))
+          : 93;
+      const passed = computedScore >= (target?.passingScorePercentage || 70);
+
+      if (target) {
+        target.previousScore = computedScore;
+        target.previousPassed = passed;
+        if (passed && target.skillId) {
+          const existingSkill = ws.skills.find((s) => s.skillId === target.skillId);
+          if (existingSkill) {
+            existingSkill.assessedScore = Math.max(existingSkill.assessedScore || 0, computedScore);
+            if (existingSkill.verificationStatus === 'SELF_DECLARED') {
+              existingSkill.verificationStatus = 'ASSESSED';
+              existingSkill.verifiedAt = new Date().toISOString();
+              existingSkill.expiresAt = '2027-11-18';
+            }
+          } else {
+            const catalogSkill = liveSkillsCatalog.find((s) => s.id === target.skillId);
+            if (catalogSkill) {
+              ws.skills.push({
+                id: `usk_${Date.now()}`,
+                userId: ws.userId,
+                skillId: catalogSkill.id,
+                skill: catalogSkill,
+                level: 'Intermediate',
+                verificationStatus: 'ASSESSED',
+                assessedScore: computedScore,
+                verifiedAt: new Date().toISOString(),
+                expiresAt: '2027-11-18',
+              });
+            }
+          }
+        }
+      }
+      syncWorkspaceRecord(ws);
       return wrapResponse({
         ...mockAssessmentResult,
         assessmentId: id,
         assessmentTitle: target?.title || mockAssessmentResult.assessmentTitle,
+        score: computedScore,
+        passed,
         timeTakenSeconds,
       });
     }
@@ -800,7 +1033,14 @@ export const projectService = {
   },
 
   async getSubmissions(): Promise<ApiEnvelope<ProjectSubmission[]>> {
-    if (isMockSessionActive()) return wrapResponse([...liveSubmissions]);
+    if (isMockSessionActive()) {
+      const activeUser = getActiveMockUser();
+      if (activeUser.roles.includes('ADMIN') || activeUser.roles.includes('MENTOR')) {
+        return wrapResponse([...liveSubmissions]);
+      }
+      const ws = getActiveWorkspace();
+      return wrapResponse([...ws.submissions]);
+    }
     const res = await apiClient.get<ApiEnvelope<ProjectSubmission[]>>('/project-submissions/my');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
@@ -814,14 +1054,16 @@ export const projectService = {
     technologiesUsed: string[];
   }): Promise<ApiEnvelope<ProjectSubmission>> {
     if (isMockSessionActive()) {
+      const activeUser = getActiveMockUser();
+      const ws = getActiveWorkspace();
       const newSub: ProjectSubmission = {
         id: `sub_${Date.now()}`,
         projectId: payload.projectId,
         projectTitle: payload.projectTitle,
-        learnerId: mockUser.id,
-        learnerName: mockUser.name,
-        learnerEmail: mockUser.email,
-        targetRole: liveCareers.find((c) => c.id === liveProfile.targetCareerId)?.title || 'Python Backend Developer',
+        learnerId: activeUser.id,
+        learnerName: activeUser.name,
+        learnerEmail: activeUser.email,
+        targetRole: liveCareers.find((c) => c.id === ws.profile.targetCareerId)?.title || 'Python Backend Developer',
         githubRepoUrl: payload.githubRepoUrl,
         liveDemoUrl: payload.liveDemoUrl,
         description: payload.description,
@@ -829,7 +1071,9 @@ export const projectService = {
         submittedAt: new Date().toISOString(),
         status: 'UNDER_REVIEW', // Learners can NEVER self-mark verified
       };
+      ws.submissions.unshift(newSub);
       liveSubmissions.unshift(newSub);
+      syncWorkspaceRecord(ws);
       return wrapResponse(newSub);
     }
     const res = await apiClient.post('/project-submissions', {
@@ -844,7 +1088,14 @@ export const projectService = {
 
 export const certificateService = {
   async getCertificates(): Promise<ApiEnvelope<Certificate[]>> {
-    if (isMockSessionActive()) return wrapResponse([...liveCertificates]);
+    if (isMockSessionActive()) {
+      const activeUser = getActiveMockUser();
+      if (activeUser.roles.includes('ADMIN') || activeUser.roles.includes('MENTOR')) {
+        return wrapResponse([...liveCertificates]);
+      }
+      const ws = getActiveWorkspace();
+      return wrapResponse([...ws.certificates]);
+    }
     const res = await apiClient.get<ApiEnvelope<Certificate[]>>('/certifications/my');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },
@@ -908,7 +1159,12 @@ export const certificateService = {
 
 export const readinessService = {
   async getReadiness(): Promise<ApiEnvelope<ReadinessScore>> {
-    if (isMockSessionActive()) return wrapResponse({ ...liveReadiness });
+    if (isMockSessionActive()) {
+      const ws = getActiveWorkspace();
+      const target =
+        liveCareers.find((c) => c.id === ws.profile.targetCareerId) || liveCareers[0];
+      return wrapResponse(computeReadinessScoreForWorkspace(ws, target));
+    }
 
     const careersRes = await apiClient.get('/careers');
     const careers = careersRes.data;
@@ -933,14 +1189,20 @@ export const readinessService = {
   },
 
   async getReadinessHistory(): Promise<ApiEnvelope<typeof liveReadinessHistory>> {
-    if (isMockSessionActive()) return wrapResponse([...liveReadinessHistory]);
+    if (isMockSessionActive()) {
+      const ws = getActiveWorkspace();
+      return wrapResponse([...ws.readinessHistory]);
+    }
 
     // Backend does not currently provide readiness history.
     return wrapResponse([]);
   },
 
   async getCareerMatches(): Promise<ApiEnvelope<CareerMatch[]>> {
-    if (isMockSessionActive()) return wrapResponse(computeCareerMatches(liveUserSkills));
+    if (isMockSessionActive()) {
+      const ws = getActiveWorkspace();
+      return wrapResponse(computeCareerMatches(ws.skills));
+    }
 
     const res = await apiClient.get('/recommendations/careers');
     const recommendations = res.data?.recommendations ?? [];
@@ -965,7 +1227,12 @@ export const readinessService = {
   },
 
   async getDomainDistribution(): Promise<ApiEnvelope<DomainRadarSnapshot[]>> {
-    if (isMockSessionActive()) return wrapResponse(mockDomainRadarSnapshots);
+    if (isMockSessionActive()) {
+      const ws = getActiveWorkspace();
+      const target =
+        liveCareers.find((c) => c.id === ws.profile.targetCareerId) || liveCareers[0];
+      return wrapResponse(computeDomainSnapshotsForWorkspace(ws, target));
+    }
 
     // Backend does not currently provide domain-distribution data.
     return wrapResponse([]);
@@ -975,20 +1242,24 @@ export const readinessService = {
 
 export const aiService = {
   async getMessages(): Promise<ApiEnvelope<AIMessage[]>> {
-    if (isMockSessionActive()) return wrapResponse([...liveAIMessages]);
+    if (isMockSessionActive()) {
+      const ws = getActiveWorkspace();
+      return wrapResponse([...ws.aiMessages]);
+    }
     return wrapResponse([...liveAIMessages]);
   },
 
   async getLearnerHistory(learnerId: string): Promise<ApiEnvelope<AIMessage[]>> {
     if (isMockSessionActive()) {
-      if (learnerId === 'usr_rahul_01') return wrapResponse([...liveAIMessages]);
-      return wrapResponse(liveDossiers[learnerId]?.aiHistory || []);
+      const ws = getOrCreateWorkspace({ userId: learnerId, careers: liveCareers });
+      return wrapResponse([...ws.aiMessages]);
     }
     return wrapResponse([]);
   },
 
   async sendMessage(content: string): Promise<ApiEnvelope<AIMessage>> {
     if (isMockSessionActive()) {
+      const ws = getActiveWorkspace();
       const userMsg: AIMessage = {
         id: `msg_usr_${Date.now()}`,
         sender: 'user',
@@ -996,18 +1267,20 @@ export const aiService = {
         content,
         timestamp: new Date().toISOString(),
       };
-      liveAIMessages.push(userMsg);
+      ws.aiMessages.push(userMsg);
 
       await new Promise((r) => setTimeout(r, 250));
 
       const lower = content.trim().toLowerCase();
       const targetCareer =
-        liveCareers.find((c) => c.id === liveProfile.targetCareerId) || liveCareers[0];
-      const verifiedCount = liveUserSkills.filter(
+        liveCareers.find((c) => c.id === ws.profile.targetCareerId) || liveCareers[0];
+      const currentReadiness = computeReadinessScoreForWorkspace(ws, targetCareer);
+      const verifiedCount = ws.skills.filter(
         (s) => s.verificationStatus !== 'SELF_DECLARED'
       ).length;
-      const gaps = computeGapsForCareer(targetCareer, liveUserSkills);
+      const gaps = computeGapsForCareer(targetCareer, ws.skills);
       const openGaps = gaps.filter((g) => g.gap !== 'NONE');
+      const topGap = openGaps[0];
       const nowIso = new Date().toISOString();
 
       let assistantMsg: AIMessage;
@@ -1021,7 +1294,7 @@ export const aiService = {
           id: `msg_asst_${Date.now()}`,
           sender: 'assistant',
           type: 'text',
-          content: `Hey! I'm your SkillForge AI Career Mentor.\n\nRight now you're tracking toward ${targetCareer.title} at ${liveReadiness.overall}% readiness (${verifiedCount}/${liveUserSkills.length} verified skills, ${openGaps.length} open skill gaps).\n\nYou can ask me:\n• "What is SkillForge?" — how verification & scoring work\n• "Analyze my weak areas" — see what's blocking 85%+ readiness\n• "What should I do next?" — get a step-by-step study plan\n• "Practice Docker quiz" — generate quick technical questions`,
+          content: `Hey ${ws.userName.split(' ')[0] || 'there'}! I'm your SkillForge AI Career Mentor.\n\nRight now you're tracking toward ${targetCareer.title} at ${currentReadiness.overall}% readiness (${verifiedCount}/${currentReadiness.totalRequiredSkills} verified skills, ${openGaps.length} open skill gaps).\n\nYou can ask me:\n• "What is SkillForge?" — how verification & scoring work\n• "Analyze my weak areas" — see what's blocking 85%+ readiness\n• "What should I do next?" — get a step-by-step study plan\n• "Practice ${topGap?.skill.name.split(' ')[0] || 'Docker'} quiz" — generate quick technical questions`,
           timestamp: nowIso,
         };
       } else if (
@@ -1083,75 +1356,94 @@ export const aiService = {
         lower.includes('gap') ||
         lower.includes('85%')
       ) {
+        const strengths = ws.skills
+          .filter((s) => s.verificationStatus !== 'SELF_DECLARED' || s.level === 'Advanced' || s.level === 'Expert')
+          .slice(0, 3)
+          .map((s) => ({
+            skill: s.skill.name,
+            score: s.assessedScore ?? (s.verificationStatus === 'SELF_DECLARED' ? 45 : 85),
+            benchmarkScore: 70,
+            isWeakness: false,
+          }));
+        const weaknesses = openGaps.slice(0, 3).map((g) => {
+          const owned = ws.skills.find((s) => s.skillId === g.skill.id);
+          return {
+            skill: g.skill.name,
+            score: owned?.assessedScore ?? (owned ? 30 : 0),
+            benchmarkScore: 70,
+            isWeakness: true,
+          };
+        });
+
         assistantMsg = {
           id: `msg_asst_${Date.now()}`,
           sender: 'assistant',
           type: 'skill_analysis',
-          content: `Current readiness is ${liveReadiness.overall}% (target: 85% Strong Candidate). Closing your DevOps and Cloud gaps plus completing the Docker capstone project will unlock the biggest score gain:`,
-          strengths: [
-            { skill: 'REST API Design', score: 94, benchmarkScore: 70, isWeakness: false },
-            { skill: 'Python Core & Async', score: 92, benchmarkScore: 75, isWeakness: false },
-            { skill: 'PostgreSQL Schema Design', score: 82, benchmarkScore: 65, isWeakness: false },
-          ],
-          weaknesses: [
-            { skill: 'Docker Containerization', score: 35, benchmarkScore: 65, isWeakness: true },
-            { skill: 'AWS Cloud Deployment', score: 25, benchmarkScore: 60, isWeakness: true },
-            { skill: 'PyTest Fixture Mocking', score: 58, benchmarkScore: 70, isWeakness: true },
-          ],
+          content: `Your current readiness for ${targetCareer.title} is ${currentReadiness.overall}% (${verifiedCount}/${currentReadiness.totalRequiredSkills} verified skills). Closing your top priority gaps will give you the largest score boost:`,
+          strengths:
+            strengths.length > 0
+              ? strengths
+              : [{ skill: 'No verified strengths yet — take your first quiz!', score: 0, benchmarkScore: 70, isWeakness: false }],
+          weaknesses:
+            weaknesses.length > 0
+              ? weaknesses
+              : [{ skill: 'All target skills meet baseline!', score: 85, benchmarkScore: 70, isWeakness: false }],
           timestamp: nowIso,
         };
       } else if (lower.includes('plan') || lower.includes('roadmap') || lower.includes('next')) {
+        const firstSkill = topGap?.skill.name || 'Python Core';
+        const secondSkill = openGaps[1]?.skill.name || 'REST APIs';
         assistantMsg = {
           id: `msg_asst_${Date.now()}`,
           sender: 'assistant',
           type: 'learning_path',
-          content: `Here is your personalized, verified-first study plan toward 85%+ ${targetCareer.title} readiness:`,
+          content: `Here is your personalized, verified-first study plan toward ${targetCareer.title} readiness:`,
           steps: [
             {
               step: 1,
-              title: 'Complete Docker Multi-Stage Build Lesson',
-              description: 'Focus on non-root execution and lean runner layers.',
-              skillUnlocked: 'Docker (Intermediate)',
+              title: `Study ${firstSkill} Module`,
+              description: `Close your highest-priority gap for ${targetCareer.title} inside the gated Roadmap.`,
+              skillUnlocked: `${firstSkill} (${topGap?.required || 'Intermediate'})`,
               courseId: 'crs_docker_01',
               estimatedHours: 2,
               isUnlocked: true,
             },
             {
               step: 2,
-              title: 'Pass Docker Architecture Assessment',
-              description: 'Score 70% or higher to upgrade status to ASSESSED.',
-              skillUnlocked: 'Docker Assessment Badge',
+              title: `Pass ${firstSkill} Timed Assessment`,
+              description: 'Score 70% or higher to upgrade status from SELF_DECLARED to ASSESSED.',
+              skillUnlocked: `${firstSkill} Assessment Badge`,
               estimatedHours: 1,
               isUnlocked: true,
             },
             {
               step: 3,
-              title: 'Submit Distributed Task Queue Project',
-              description: 'Build a containerized worker pool with Redis and FastAPI for mentor review.',
-              skillUnlocked: 'Docker & Microservices (Project-Verified)',
-              estimatedHours: 12,
+              title: `Build & Submit Capstone Project (${secondSkill})`,
+              description: 'Submit a GitHub repository for 8-point mentor rubric inspection.',
+              skillUnlocked: `${secondSkill} (Project-Verified)`,
+              estimatedHours: 8,
               isUnlocked: false,
             },
           ],
           timestamp: nowIso,
         };
       } else if (lower.includes('readiness') || lower.includes('score') || lower.includes('formula')) {
-        const b = liveReadiness.breakdown;
+        const b = currentReadiness.breakdown;
         assistantMsg = {
           id: `msg_asst_${Date.now()}`,
           sender: 'assistant',
           type: 'text',
-          content: `Your current Readiness Score for ${targetCareer.title} is ${liveReadiness.overall}% (${liveReadiness.level.replace(/_/g, ' ')}).\n\nBreakdown:\n• Technical Skills (35% weight): ${b.technicalSkills}%\n• Timed Assessments (25% weight): ${b.assessments}%\n• Mentor-Reviewed Projects (25% weight): ${b.projects}%\n• Interview Prep (15% weight): ${b.interviewPrep}%\n\nYou are only ${Math.max(1, 75 - liveReadiness.overall)} points away from Strong Candidate (75%+). Improving Docker & Interview Prep gives you the fastest lift.`,
+          content: `Your current Readiness Score for ${targetCareer.title} is ${currentReadiness.overall}% (${currentReadiness.level.replace(/_/g, ' ')}).\n\nBreakdown:\n• Technical Skills (35% weight): ${b.technicalSkills}%\n• Timed Assessments (25% weight): ${b.assessments}%\n• Mentor-Reviewed Projects (25% weight): ${b.projects}%\n• Interview Prep (15% weight): ${b.interviewPrep}%\n\nComplete timed assessments and submit a project to raise your verified score fastest.`,
           timestamp: nowIso,
         };
       } else if (lower.includes('project') || lower.includes('mentor') || lower.includes('review')) {
-        const pendingCount = liveSubmissions.filter((s) => s.status === 'UNDER_REVIEW').length;
-        const passedCount = liveSubmissions.filter((s) => s.status === 'PASSED').length;
+        const pendingCount = ws.submissions.filter((s) => s.status === 'UNDER_REVIEW').length;
+        const passedCount = ws.submissions.filter((s) => s.status === 'PASSED').length;
         assistantMsg = {
           id: `msg_asst_${Date.now()}`,
           sender: 'assistant',
           type: 'text',
-          content: `Projects require formal Mentor Code Review (learners cannot self-verify submissions).\n\nYour current status:\n• Passed projects: ${passedCount}\n• Awaiting mentor review: ${pendingCount}\n• Recommended next build: "${liveProjects[1]?.title || 'Distributed Background Job Queue with Docker Compose'}"\n\nOpen the Projects tab to submit a GitHub repo or review rubric feedback.`,
+          content: `Projects require formal Mentor Code Review (learners cannot self-verify submissions).\n\nYour current status:\n• Passed projects: ${passedCount}\n• Awaiting mentor review: ${pendingCount}\n• Recommended next build: "${liveProjects[0]?.title || 'Production REST API Capstone'}"\n\nOpen the Projects tab to submit a GitHub repo or review rubric feedback.`,
           timestamp: nowIso,
         };
       } else if (lower.includes('cert') || lower.includes('badge') || lower.includes('verify')) {
@@ -1159,7 +1451,7 @@ export const aiService = {
           id: `msg_asst_${Date.now()}`,
           sender: 'assistant',
           type: 'text',
-          content: `You currently have ${liveCertificates.length} certificates on record.\n\nCertificates are awarded once you meet course completion, quiz average (≥70%), and mentor-verified project benchmarks. Any employer can verify a certificate ID publicly at /verify.`,
+          content: `You currently have ${ws.certificates.length} certificate${ws.certificates.length === 1 ? '' : 's'} on record.\n\nCertificates are awarded once you meet course completion, quiz average (≥70%), and mentor-verified project benchmarks. Any employer can verify a certificate ID publicly at /verify.`,
           timestamp: nowIso,
         };
       } else if (
@@ -1180,7 +1472,7 @@ export const aiService = {
           id: `msg_asst_${Date.now()}`,
           sender: 'assistant',
           type: 'text',
-          content: `For ${targetCareer.title}, you have ${verifiedCount} verified skills out of ${liveUserSkills.length} tracked.\n\nOpen skill gaps to close:\n• ${gapNames}\n\nTip: Pick a skill in the Practice Generator above (Docker, FastAPI, PostgreSQL, Python, or AWS) or type "Practice Docker quiz" to test yourself immediately.`,
+          content: `For ${targetCareer.title}, you have ${verifiedCount} verified skills out of ${ws.skills.length} tracked.\n\nOpen skill gaps to close:\n• ${gapNames}\n\nTip: Pick a skill in the Practice Generator above or type "Practice Docker quiz" to test yourself immediately.`,
           timestamp: nowIso,
         };
       } else {
@@ -1188,36 +1480,39 @@ export const aiService = {
           id: `msg_asst_${Date.now()}`,
           sender: 'assistant',
           type: 'text',
-          content: `Good question about "${content.trim()}".\n\nBased on your ${targetCareer.title} track (${liveReadiness.overall}% readiness), I can help you:\n• Break down your ${openGaps.length} remaining skill gaps\n• Generate targeted quiz questions for Docker, FastAPI, PostgreSQL, Python, or AWS\n• Recommend which course, assessment, or capstone project to tackle next\n\nTell me which topic or goal you'd like to dive into!`,
+          content: `Good question about "${content.trim()}".\n\nBased on your ${targetCareer.title} track (${currentReadiness.overall}% readiness), I can help you:\n• Break down your ${openGaps.length} remaining skill gaps\n• Generate targeted quiz questions for Docker, FastAPI, PostgreSQL, Python, or AWS\n• Recommend which course, assessment, or capstone project to tackle next\n\nTell me which topic or goal you'd like to dive into!`,
           timestamp: nowIso,
         };
       }
 
-      liveAIMessages.push(assistantMsg);
+      ws.aiMessages.push(assistantMsg);
+      saveWorkspace(ws);
       return wrapResponse(assistantMsg);
     }
 
     const res = await apiClient.post('/project-agent/ask', {
-  question: content,
-});
+      question: content,
+    });
 
-const answer = res.data?.answer ?? 'No response received from AI.';
+    const answer = res.data?.answer ?? 'No response received from AI.';
 
-const assistantMsg: AIMessage = {
-  id: `msg_asst_${Date.now()}`,
-  sender: 'assistant',
-  type: 'text',
-  content: answer,
-  timestamp: new Date().toISOString(),
-};
+    const assistantMsg: AIMessage = {
+      id: `msg_asst_${Date.now()}`,
+      sender: 'assistant',
+      type: 'text',
+      content: answer,
+      timestamp: new Date().toISOString(),
+    };
 
-liveAIMessages.push(assistantMsg);
-return wrapResponse(assistantMsg);
+    liveAIMessages.push(assistantMsg);
+    return wrapResponse(assistantMsg);
   },
 
   async clearMessages(): Promise<void> {
     if (isMockSessionActive()) {
-      liveAIMessages = [];
+      const ws = getActiveWorkspace();
+      ws.aiMessages = [];
+      saveWorkspace(ws);
     }
   },
 
@@ -1272,9 +1567,10 @@ return wrapResponse(assistantMsg);
       const scorePercentage = Math.round((correctCount / totalQuestions) * 100);
       const skillObj = liveSkillsCatalog.find((s) => s.id === params.skillId) || liveSkillsCatalog[7];
 
-      // Feed result back into learner's skill & readiness state
+      const ws = getActiveWorkspace();
+      // Feed result back into active learner's skill & readiness state
       let gapUpdated = false;
-      const existingSkill = liveUserSkills.find((us) => us.skillId === params.skillId);
+      const existingSkill = ws.skills.find((us) => us.skillId === params.skillId);
       if (scorePercentage >= 60) {
         gapUpdated = true;
         if (existingSkill) {
@@ -1285,38 +1581,30 @@ return wrapResponse(assistantMsg);
           if (existingSkill.verificationStatus === 'SELF_DECLARED' && scorePercentage >= 70) {
             existingSkill.verificationStatus = 'ASSESSED';
             existingSkill.verifiedAt = new Date().toISOString();
-            existingSkill.expiresAt = '2027-11-12';
+            existingSkill.expiresAt = '2027-11-18';
           }
         } else {
-          liveUserSkills.push({
+          ws.skills.push({
             id: `usk_${Date.now()}`,
-            userId: mockUser.id,
+            userId: ws.userId,
             skillId: params.skillId,
             skill: skillObj,
             level: scorePercentage >= 75 ? 'Intermediate' : 'Beginner',
             verificationStatus: scorePercentage >= 70 ? 'ASSESSED' : 'SELF_DECLARED',
             assessedScore: scorePercentage,
-            expiresAt: scorePercentage >= 70 ? '2027-11-12' : undefined,
+            expiresAt: scorePercentage >= 70 ? '2027-11-18' : undefined,
           });
         }
       }
 
       const readinessDelta = scorePercentage >= 70 ? 2 : scorePercentage >= 50 ? 1 : 0;
       if (readinessDelta > 0) {
-        liveReadiness.overall = Math.min(100, liveReadiness.overall + readinessDelta);
-        liveReadiness.breakdown.technicalSkills = Math.min(100, liveReadiness.breakdown.technicalSkills + readinessDelta);
-        liveReadinessHistory = [
-          ...liveReadinessHistory.slice(0, -1),
-          {
-            date: 'Nov 2026',
-            score: liveReadiness.overall,
-            level: liveReadiness.overall >= 75 ? ('STRONG_CANDIDATE' as const) : ('JUNIOR_READY' as const),
-          },
-        ];
+        ws.practiceBonus = Math.min(20, (ws.practiceBonus || 0) + readinessDelta);
       }
+      syncWorkspaceRecord(ws);
 
-      const targetCareer = liveCareers.find((c) => c.id === liveProfile.targetCareerId) || liveCareers[0];
-      const updatedGaps = computeGapsForCareer(targetCareer, liveUserSkills);
+      const targetCareer = liveCareers.find((c) => c.id === ws.profile.targetCareerId) || liveCareers[0];
+      const updatedGaps = computeGapsForCareer(targetCareer, ws.skills);
       const updatedGapItem = updatedGaps.find((g) => g.skill.id === params.skillId);
       const newGapLabel = updatedGapItem?.gap || (scorePercentage >= 75 ? 'NONE' : 'MEDIUM');
 
@@ -1425,16 +1713,26 @@ export const mentorService = {
 
       const updated = liveSubmissions.find((sub) => sub.id === payload.submissionId) || liveSubmissions[0];
 
-      // Upgrade learner's target project skill to PROJECT_VERIFIED when approved
-      if (passed && updated.learnerId === mockUser.id) {
-        const dockerSkill = liveUserSkills.find((sk) => sk.skillId === 'sk_docker');
+      // Upgrade learner's workspace submission and skill when reviewed
+      const learnerWs = getOrCreateWorkspace({
+        userId: updated.learnerId,
+        userName: updated.learnerName,
+        userEmail: updated.learnerEmail,
+        careers: liveCareers,
+      });
+      learnerWs.submissions = learnerWs.submissions.map((s) =>
+        s.id === updated.id ? updated : s
+      );
+      if (passed) {
+        const dockerSkill = learnerWs.skills.find((sk) => sk.skillId === 'sk_docker');
         if (dockerSkill) {
           dockerSkill.verificationStatus = 'PROJECT_VERIFIED';
           dockerSkill.level = 'Intermediate';
           dockerSkill.assessedScore = Math.round((totalScore / 80) * 100);
-          dockerSkill.expiresAt = '2027-11-12';
+          dockerSkill.expiresAt = '2027-11-18';
         }
       }
+      syncWorkspaceRecord(learnerWs);
 
       appendAudit({
         actorName: payload.reviewerName || 'Marcus Vance',
@@ -1460,7 +1758,14 @@ export const mentorService = {
 
 export const adminService = {
   async getUsers(): Promise<ApiEnvelope<ManagedUserRecord[]>> {
-    if (isMockSessionActive()) return wrapResponse([...liveManagedUsers]);
+    if (isMockSessionActive()) {
+      const persisted = loadPersistedMockUsers();
+      const mergedMap = new Map<string, ManagedUserRecord>();
+      for (const u of [...liveManagedUsers, ...persisted]) {
+        mergedMap.set(u.id, u);
+      }
+      return wrapResponse(Array.from(mergedMap.values()));
+    }
     const res = await apiClient.get<ApiEnvelope<ManagedUserRecord[]>>('/admin/users');
     return wrapResponse((res.data as any)?.data ?? res.data);
   },

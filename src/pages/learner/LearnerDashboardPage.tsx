@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { DashboardScreen } from '../../components/screens/DashboardScreen';
 import { userService } from '../../lib/api/services';
+import { useAuthStore } from '../../stores/authStore';
 import type { UserSkill } from '../../types';
 import { createLearnerNavigator } from './navigationHelper';
 import { AlertTriangle, ArrowRight } from 'lucide-react';
@@ -11,10 +12,12 @@ interface LearnerDashboardPageProps {
 
 export function LearnerDashboardPage({ onNavigate }: LearnerDashboardPageProps) {
   const nav = createLearnerNavigator(onNavigate);
+  const userId = useAuthStore((s) => s.user?.id);
   const [expiringSkills, setExpiringSkills] = useState<UserSkill[]>([]);
 
   useEffect(() => {
     let mounted = true;
+    setExpiringSkills([]);
     userService.getUserSkills().then((res) => {
       if (!mounted) return;
       const now = new Date('2026-11-12T00:00:00Z').getTime();
@@ -29,7 +32,7 @@ export function LearnerDashboardPage({ onNavigate }: LearnerDashboardPageProps) 
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [userId]);
 
   return (
     <div className="space-y-6">

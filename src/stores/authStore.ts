@@ -4,6 +4,7 @@ import type { User, LearnerProfile, Role, Permission } from '../types';
 import { ROLE_PERMISSIONS } from '../constants';
 import { authService } from '../lib/api/services';
 import { registerUnauthorizedHandler } from '../lib/api/client';
+import { useMentorStore } from './mentorStore';
 
 interface AuthState {
   token: string | null;
@@ -62,6 +63,7 @@ export const useAuthStore = create<AuthState>()(
             isAuthenticated: true,
             authError: null,
           });
+          useMentorStore.getState().resetLocalState();
           return true;
         } catch (err: any) {
           const message = err?.message || 'Invalid email or password.';
@@ -88,6 +90,7 @@ export const useAuthStore = create<AuthState>()(
             isAuthenticated: true,
             authError: null,
           });
+          useMentorStore.getState().resetLocalState();
           return true;
         } catch (err: any) {
           const message = err?.message || 'Unable to create account.';
@@ -117,6 +120,7 @@ export const useAuthStore = create<AuthState>()(
 
       logout: () => {
         document.cookie = 'skillforge_role=; path=/; max-age=0;';
+        useMentorStore.getState().resetLocalState();
         set({
           token: null,
           refreshToken: null,

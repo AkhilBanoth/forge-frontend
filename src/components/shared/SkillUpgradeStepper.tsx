@@ -14,11 +14,11 @@ export function SkillUpgradeStepper({
 }: SkillUpgradeStepperProps) {
   return (
     <div className={cn('w-full border border-border bg-card rounded-lg p-4', className)}>
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between gap-3 mb-3">
         <span className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
           Skill Upgrade Pipeline: Course → Assessment → Project → Verification
         </span>
-        <span className="text-xs font-mono font-medium">
+        <span className="text-xs font-mono font-medium shrink-0 whitespace-nowrap">
           Step {Math.min(4, Math.max(1, currentStepIndex))} of 4
         </span>
       </div>

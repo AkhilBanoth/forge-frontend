@@ -1,11 +1,40 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { PageHeader } from '../shared/PageHeader';
 import { SkillLevelMeter } from '../shared/SkillLevelMeter';
 import { VerificationBadge } from '../shared/VerificationBadge';
-import { mockSkillGaps, mockUserSkills } from '../../lib/mocks/data';
+import { useAuthStore } from '../../stores/authStore';
+import { careerService, skillGapService, userService } from '../../lib/api/services';
+import type { CareerRole, SkillGap, UserSkill } from '../../types';
 import { ArrowRight, Calendar } from 'lucide-react';
 
 export function SkillGapScreen({ onNavigate }: { onNavigate: (path: string) => void }) {
+  const userId = useAuthStore((state) => state.user?.id);
+  const profile = useAuthStore((state) => state.profile);
+  const [gaps, setGaps] = useState<SkillGap[]>([]);
+  const [userSkills, setUserSkills] = useState<UserSkill[]>([]);
+  const [targetCareer, setTargetCareer] = useState<CareerRole | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    Promise.all([
+      skillGapService.getSkillGaps(),
+      userService.getUserSkills(),
+      careerService.getCareers(),
+    ])
+      .then(([gapRes, skillRes, careerRes]) => {
+        if (!mounted) return;
+        setGaps((gapRes.data || []).filter((g) => g.gap !== 'NONE'));
+        setUserSkills(skillRes.data || []);
+        const matched =
+          careerRes.data.find((c) => c.id === profile?.targetCareerId) || careerRes.data[0] || null;
+        setTargetCareer(matched);
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [userId, profile?.targetCareerId]);
+
   return (
     <div className="space-y-8 select-none">
       <PageHeader
@@ -20,10 +49,12 @@ export function SkillGapScreen({ onNavigate }: { onNavigate: (path: string) => v
               <span className="font-mono text-xs uppercase font-bold text-muted-foreground">
                 Target Job Role
               </span>
-              <h2 className="text-lg font-bold text-foreground">Python Backend Developer (75% Target)</h2>
+              <h2 className="text-lg font-bold text-foreground">
+                {targetCareer?.title || 'Python Backend Developer'} ({targetCareer?.targetScore || 75}% Target)
+              </h2>
             </div>
             <span className="font-mono text-xs border border-border bg-card px-3 py-1 rounded">
-              {mockSkillGaps.length} Skill Gaps Found
+              {gaps.length} Skill Gap{gaps.length === 1 ? '' : 's'} Found
             </span>
           </div>
         </div>
@@ -41,8 +72,8 @@ export function SkillGapScreen({ onNavigate }: { onNavigate: (path: string) => v
               </tr>
             </thead>
             <tbody className="divide-y divide-border/60">
-              {mockSkillGaps.map((gap) => {
-                const userSkill = mockUserSkills.find((us) => us.skillId === gap.skill.id);
+              {gaps.map((gap) => {
+                const userSkill = userSkills.find((us) => us.skillId === gap.skill.id);
                 return (
                   <tr key={gap.skill.id} className="hover:bg-secondary/30 transition-colors">
                     <td className="py-3.5 px-4">
